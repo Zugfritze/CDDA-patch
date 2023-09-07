@@ -1,0 +1,132 @@
+From 5929d54276c280828b239239b88b80332502d550 Mon Sep 17 00:00:00 2001
+From: Surflurer <22912139+Surflurer@users.noreply.github.com>
+Date: Sat, 19 Aug 2023 15:30:08 +0800
+Subject: [PATCH 1/2] Check the actual fullness of all kinds of containers in
+ item::seal()
+
+---
+ src/item.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/item.cpp b/src/item.cpp
+index 44c1be7d65d9f..84894ede2f519 100644
+--- a/src/item.cpp
++++ b/src/item.cpp
+@@ -9436,7 +9436,8 @@ bool item::is_map() const
+ 
+ bool item::seal()
+ {
+-    if( is_container_full() ) {
++    // Check the actual fullness of all kinds of containers.
++    if( is_container_full( /*allow_bucket = */ true ) ) {
+         return contents.seal_all_pockets();
+     } else {
+         return false;
+
+From 5995443af4cbe72f5274e0fa4a809a73754fc918 Mon Sep 17 00:00:00 2001
+From: Surflurer <22912139+Surflurer@users.noreply.github.com>
+Date: Sat, 19 Aug 2023 15:30:43 +0800
+Subject: [PATCH 2/2] Fill up test container so tests pass
+
+---
+ tests/unseal_and_spill_test.cpp | 59 +++++++++++++++++++++++++++++++++
+ 1 file changed, 59 insertions(+)
+
+diff --git a/tests/unseal_and_spill_test.cpp b/tests/unseal_and_spill_test.cpp
+index 72152b0d2d26e..85578e55203cb 100644
+--- a/tests/unseal_and_spill_test.cpp
++++ b/tests/unseal_and_spill_test.cpp
+@@ -339,6 +339,12 @@ void test_scenario::run()
+                                     {}
+                                 }
+                             }
++                        },
++                        initialization {
++                            itype_test_solid_1ml,
++                            true,
++                            false,
++                            {}
+                         }
+                     }
+                 }
+@@ -591,6 +597,12 @@ void test_scenario::run()
+                             false,
+                             false,
+                             {}
++                        },
++                        final_result {
++                            itype_test_solid_1ml,
++                            false,
++                            false,
++                            {}
+                         }
+                     }
+                 };
+@@ -602,6 +614,41 @@ void test_scenario::run()
+                         {}
+                     }
+                 };
++            } else if( !will_spill_outer && !do_spill ) {
++                original_location = final_result{
++                    itype_test_watertight_open_sealed_container_1L,
++                    false,
++                    false,
++                    {
++                        final_result {
++                            itype_test_solid_1ml,
++                            false,
++                            false,
++                            {}
++                        }
++                    }
++                };
++                ground = {
++                    final_result {
++                        itype_test_watertight_open_sealed_multipocket_container_2x250ml,
++                        false,
++                        false,
++                        {
++                            final_result {
++                                itype_test_liquid_1ml,
++                                false,
++                                false,
++                                {}
++                            },
++                            final_result {
++                                itype_test_liquid_1ml,
++                                false,
++                                false,
++                                {}
++                            }
++                        }
++                    }
++                };
+             } else if( !do_spill ) {
+                 original_location = final_result {
+                     itype_test_watertight_open_sealed_container_1L,
+@@ -628,6 +675,12 @@ void test_scenario::run()
+                                 {}
+                             }
+                         }
++                    },
++                    final_result {
++                        itype_test_solid_1ml,
++                        false,
++                        false,
++                        {}
+                     }
+                 };
+             } else {
+@@ -649,6 +702,12 @@ void test_scenario::run()
+                         false,
+                         false,
+                         {}
++                    },
++                    final_result {
++                        itype_test_solid_1ml,
++                        false,
++                        false,
++                        {}
+                     }
+                 };
+             }
