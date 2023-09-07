@@ -1,0 +1,49 @@
+From 567cc9d8c3c08acac80d2c05770843cd1a738e0b Mon Sep 17 00:00:00 2001
+From: Zugfritze <70323844+Zugfritze@users.noreply.github.com>
+Date: Tue, 5 Sep 2023 07:53:16 +0800
+Subject: [PATCH] Revert "Revert "Improve turn performance by caching default
+ input ctx""
+
+This reverts commit 863d0956a3134369d0b0f20d607077e3dbef7497.
+---
+ src/game.cpp | 9 ++++++++-
+ src/game.h   | 3 ++-
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index fa7b66c28e..5182b23f69 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -2398,7 +2398,14 @@ tripoint game::mouse_edge_scrolling_overmap( input_context &ctxt )
+     return ret.first;
+ }
+ 
+-input_context get_default_mode_input_context()
++static input_context default_mode_input_context = create_default_mode_input_context();
++
++input_context &get_default_mode_input_context()
++{
++    return default_mode_input_context;
++}
++
++input_context create_default_mode_input_context()
+ {
+     input_context ctxt( "DEFAULTMODE", keyboard_mode::keycode );
+     // Because those keys move the character, they don't pan, as their original name says
+diff --git a/src/game.h b/src/game.h
+index 014c5a155b..6cd3cff6f1 100644
+--- a/src/game.h
++++ b/src/game.h
+@@ -57,7 +57,8 @@ extern int savegame_loading_version;
+ 
+ class input_context;
+ 
+-input_context get_default_mode_input_context();
++input_context create_default_mode_input_context();
++input_context &get_default_mode_input_context();
+ 
+ enum quit_status {
+     QUIT_NO = 0,    // Still playing
+-- 
+2.42.0.windows.1
+
