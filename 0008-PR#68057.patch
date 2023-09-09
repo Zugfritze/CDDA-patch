@@ -1,0 +1,43 @@
+From 0b085294d914e7ce79aa686dad5d1c48192c2cd5 Mon Sep 17 00:00:00 2001
+From: inogenous <123803852+inogenous@users.noreply.github.com>
+Date: Sat, 9 Sep 2023 07:20:55 +0200
+Subject: [PATCH] Bugfix: Re-scroll list of options when toggling header
+
+* Prevents issue where toggling (expanding/minimizing) a header in the list of options would cause old entries to be displayed
+
+Issue being resolved can be reproduced by:
+* Main menu -> Settings -> Options
+* Expand all headers so that the list of options displays more items than can fit on screen.
+* For example, in "Interface" tab, expand all headers such as "QOL Options" and "Mouse control options" so that the scrollbar is visible.
+* Close "QOL options" so that the header is no longer displayed with `-` but instead is displayed as `+`.
+* The bottom of the list now displays old entries that should not be visible.
+---
+ src/options.cpp | 1 +
+ src/output.cpp  | 2 ++
+ 2 files changed, 3 insertions(+)
+
+diff --git a/src/options.cpp b/src/options.cpp
+index d560b6381961f..4964056a8c46d 100644
+--- a/src/options.cpp
++++ b/src/options.cpp
+@@ -3826,6 +3826,7 @@ std::string options_manager::show( bool ingame, const bool world_options_only, b
+                 case ItemType::GroupHeader: {
+                     bool &state = groups_state[curr_item.data];
+                     state = !state;
++                    recalc_startpos = true;
+                     break;
+                 }
+                 case ItemType::BlankLine: {
+diff --git a/src/output.cpp b/src/output.cpp
+index c80fbb321db07..c53728257cc63 100644
+--- a/src/output.cpp
++++ b/src/output.cpp
+@@ -2245,6 +2245,8 @@ void calcStartPos( int &iStartPos, const int iCurrentLine, const int iContentHei
+             iStartPos = iCurrentLine;
+         } else if( iCurrentLine >= iStartPos + iContentHeight ) {
+             iStartPos = 1 + iCurrentLine - iContentHeight;
++        } else if( iStartPos + iContentHeight > iNumEntries ) {
++            iStartPos = iNumEntries - iContentHeight;
+         }
+     }
+ }
