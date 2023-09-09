@@ -1,0 +1,32 @@
+From 7bb32f10efd3cb297a6a63516f013323d4125260 Mon Sep 17 00:00:00 2001
+From: Andrew Krieger <akrieger@users.noreply.github.com>
+Date: Fri, 8 Sep 2023 20:40:49 -0700
+Subject: [PATCH] Memory management shouldn't bloat picking a fluid container
+ 1000%
+
+---
+ src/item.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/item.cpp b/src/item.cpp
+index 8a12530d81d7b..6afa860da5490 100644
+--- a/src/item.cpp
++++ b/src/item.cpp
+@@ -14019,7 +14019,7 @@ std::string item::type_name( unsigned int quantity ) const
+     // Apply conditional names, in order.
+     for( const conditional_name &cname : type->conditional_names ) {
+         // Lambda for searching for a item ID among all components.
+-        std::function<bool( item_components )> component_id_equals =
++        std::function<bool( const item_components & )> component_id_equals =
+         [&]( const item_components & components ) {
+             for( const item_components::type_vector_pair &tvp : components ) {
+                 for( const item &component : tvp.second ) {
+@@ -14031,7 +14031,7 @@ std::string item::type_name( unsigned int quantity ) const
+             return false;
+         };
+         // Lambda for recursively searching for a item ID substring among all components.
+-        std::function<bool ( item_components )> component_id_contains =
++        std::function<bool ( const item_components & )> component_id_contains =
+         [&]( const item_components & components ) {
+             for( const item_components::type_vector_pair &tvp : components ) {
+                 for( const item &component : tvp.second ) {
