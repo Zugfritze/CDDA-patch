@@ -1,0 +1,72 @@
+From 89cc596fea2154ce80fdd056d21d727aa6971037 Mon Sep 17 00:00:00 2001
+From: Zugfritze <70323844+Zugfritze@users.noreply.github.com>
+Date: Sun, 10 Sep 2023 21:42:29 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=85=B6=E4=BB=96=E4=BF=AE=E6=94=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/debug_menu.cpp   | 4 ++--
+ src/newcharacter.cpp | 8 ++++----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/src/debug_menu.cpp b/src/debug_menu.cpp
+index 4a309b9264..4229d52c42 100644
+--- a/src/debug_menu.cpp
++++ b/src/debug_menu.cpp
+@@ -1774,12 +1774,12 @@ static void character_edit_desc_menu( Character &you )
+         break;
+         case 2: {
+             string_input_popup popup;
+-            popup.title( _( "Enter age in years.  Minimum 16, maximum 55" ) )
++            popup.title( _( "Enter age in years.  Minimum 11, maximum 55" ) )
+             .text( string_format( "%d", you.base_age() ) )
+             .only_digits( true );
+             const int result = popup.query_int();
+             if( result != 0 ) {
+-                you.set_base_age( clamp( result, 16, 55 ) );
++                you.set_base_age( clamp( result, 11, 55 ) );
+             }
+         }
+         break;
+diff --git a/src/newcharacter.cpp b/src/newcharacter.cpp
+index b8b4f57d0a..b3e02741ff 100644
+--- a/src/newcharacter.cpp
++++ b/src/newcharacter.cpp
+@@ -3936,7 +3936,7 @@ void set_description( tab_manager &tabs, avatar &you, const bool allow_reroll,
+         }
+     } );
+ 
+-    int min_allowed_age = 16;
++    int min_allowed_age = 11;
+     int max_allowed_age = 55;
+ 
+     int min_allowed_height = Character::min_height();
+@@ -4117,7 +4117,7 @@ void set_description( tab_manager &tabs, avatar &you, const bool allow_reroll,
+                 you.pick_name();
+                 no_name_entered = you.name.empty();
+             }
+-            you.set_base_age( rng( 16, 55 ) );
++            you.set_base_age( rng( 11, 55 ) );
+             you.randomize_height();
+             you.randomize_blood();
+             you.randomize_heartrate();
+@@ -4174,12 +4174,12 @@ void set_description( tab_manager &tabs, avatar &you, const bool allow_reroll,
+                     break;
+                 }
+                 case char_creation::AGE: {
+-                    popup.title( _( "Enter age in years.  Minimum 16, maximum 55" ) )
++                    popup.title( _( "Enter age in years.  Minimum 11, maximum 55" ) )
+                     .text( string_format( "%d", you.base_age() ) )
+                     .only_digits( true );
+                     const int result = popup.query_int();
+                     if( result != 0 ) {
+-                        you.set_base_age( clamp( result, 16, 55 ) );
++                        you.set_base_age( clamp( result, 11, 55 ) );
+                     }
+                     break;
+                 }
+-- 
+2.42.0.windows.2
+
