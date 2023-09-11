@@ -1,0 +1,801 @@
+From 7aebe489464d9bb1527e748d0582bb1b16c75f1b Mon Sep 17 00:00:00 2001
+From: Kamayana <pigbuster@gmail.com>
+Date: Thu, 24 Aug 2023 21:28:33 -0500
+Subject: [PATCH 1/5] Only clear `weight_carried_cache` on move if using
+ lifting assist
+
+---
+ src/character.cpp | 7 ++++++-
+ src/character.h   | 1 +
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/character.cpp b/src/character.cpp
+index 15997d9bff9af..435a65c88f3da 100644
+--- a/src/character.cpp
++++ b/src/character.cpp
+@@ -3011,7 +3011,9 @@ void Character::on_move( const tripoint_abs_ms &old_pos )
+ {
+     Creature::on_move( old_pos );
+     // In case we've moved out of range of lifting assist.
+-    invalidate_weight_carried_cache();
++    if( using_lifting_assist ) {
++        invalidate_weight_carried_cache();
++    }
+ }
+ 
+ units::mass Character::weight_carried() const
+@@ -3087,6 +3089,9 @@ units::mass Character::weight_carried_with_tweaks( const item_tweaks &tweaks ) c
+     if( ( weaponweight + ret <= weight_capacity() ) || ( g->new_game ||
+             best_nearby_lifting_assist() < weaponweight ) ) {
+         ret += weaponweight;
++        using_lifting_assist = false;
++    } else {
++        using_lifting_assist = true;
+     }
+ 
+     return ret;
+diff --git a/src/character.h b/src/character.h
+index e9f564a05f9f3..8a2967956d347 100644
+--- a/src/character.h
++++ b/src/character.h
+@@ -3906,6 +3906,7 @@ class Character : public Creature, public visitable
+         int sleep_deprivation;
+         bool check_encumbrance = true;
+         bool cache_inventory_is_valid = false;
++        mutable bool using_lifting_assist = false;
+ 
+         int stim;
+         int pkill;
+
+From 0ab8dfe17e6e83678ede208316481ab1fa1cfba0 Mon Sep 17 00:00:00 2001
+From: Kamayana <pigbuster@gmail.com>
+Date: Mon, 4 Sep 2023 18:13:48 -0500
+Subject: [PATCH 2/5] Remove weight/encumbrance cache reset from `on_drop`
+
+`on_drop` was overzealously invalidating the weight carried cache way too often, since it's called inside `add_drop_from_character`, which is used for adding an item to the map for any reason, such as when loading map items.
+---
+ src/item.cpp | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/src/item.cpp b/src/item.cpp
+index 8a12530d81d7b..65512015af0f3 100644
+--- a/src/item.cpp
++++ b/src/item.cpp
+@@ -14207,8 +14207,6 @@ bool item::on_drop( const tripoint &pos, map &m )
+     // set variable storing information of character dropping item
+     dropped_char_stats.throwing = player_character.get_skill_level( skill_throw );
+ 
+-    player_character.flag_encumbrance();
+-    player_character.invalidate_weight_carried_cache();
+     return type->drop_action && type->drop_action.call( &player_character, *this, pos );
+ }
+ 
+
+From 1689f6eacd51b896dbe62ca08c477d1f1754b492 Mon Sep 17 00:00:00 2001
+From: Kamayana <pigbuster@gmail.com>
+Date: Tue, 5 Sep 2023 14:32:14 -0500
+Subject: [PATCH 3/5] Adjust `invalidate_weight_carried_cache` calls
+
+Mostly moved them to lower-level inventory change functions
+---
+ src/activity_actor.cpp         | 1 -
+ src/activity_item_handling.cpp | 3 +--
+ src/character.cpp              | 6 ++++++
+ src/character_attire.cpp       | 1 +
+ src/consumption.cpp            | 1 +
+ src/item.cpp                   | 5 +++--
+ src/item_pocket.cpp            | 7 +++++--
+ src/itype.cpp                  | 2 --
+ src/iuse_actor.cpp             | 1 -
+ src/visitable.cpp              | 2 ++
+ 10 files changed, 19 insertions(+), 10 deletions(-)
+
+diff --git a/src/activity_actor.cpp b/src/activity_actor.cpp
+index 5abb83afab6aa..ceb40e954a06b 100644
+--- a/src/activity_actor.cpp
++++ b/src/activity_actor.cpp
+@@ -3783,7 +3783,6 @@ void drop_or_stash_item_info::deserialize( const JsonObject &jsobj )
+ void drop_activity_actor::do_turn( player_activity &, Character &who )
+ {
+     const tripoint_bub_ms pos = placement + who.pos_bub();
+-    who.invalidate_weight_carried_cache();
+     put_into_vehicle_or_drop( who, item_drop_reason::deliberate,
+                               obtain_activity_items( items, handler, who ),
+                               pos, force_ground );
+diff --git a/src/activity_item_handling.cpp b/src/activity_item_handling.cpp
+index 6d642bf0f29af..2cb7338be9cd7 100644
+--- a/src/activity_item_handling.cpp
++++ b/src/activity_item_handling.cpp
+@@ -207,10 +207,10 @@ static bool handle_spillable_contents( Character &c, item &it, map &m )
+ static void put_into_vehicle( Character &c, item_drop_reason reason, const std::list<item> &items,
+                               const vpart_reference &vpr )
+ {
+-    c.invalidate_weight_carried_cache();
+     if( items.empty() ) {
+         return;
+     }
++    c.invalidate_weight_carried_cache();
+     vehicle_part &vp = vpr.part();
+     vehicle &veh = vpr.vehicle();
+     const tripoint where = veh.global_part_pos3( vp );
+@@ -329,7 +329,6 @@ static void put_into_vehicle( Character &c, item_drop_reason reason, const std::
+ void drop_on_map( Character &you, item_drop_reason reason, const std::list<item> &items,
+                   const tripoint_bub_ms &where )
+ {
+-    you.invalidate_weight_carried_cache();
+     if( items.empty() ) {
+         return;
+     }
+diff --git a/src/character.cpp b/src/character.cpp
+index 435a65c88f3da..4cfb08acd4771 100644
+--- a/src/character.cpp
++++ b/src/character.cpp
+@@ -2996,6 +2996,7 @@ item Character::remove_weapon()
+     weapon = item();
+     get_event_bus().send<event_type::character_wields_item>( getID(), weapon.typeId() );
+     cached_info.erase( "weapon_value" );
++    invalidate_weight_carried_cache();
+     return tmp;
+ }
+ 
+@@ -9549,6 +9550,7 @@ void Character::on_item_wear( const item &it )
+ void Character::on_item_takeoff( const item &it )
+ {
+     invalidate_inventory_validity_cache();
++    invalidate_weight_carried_cache();
+     invalidate_leak_level_cache();
+     for( const trait_id &mut : it.mutations_from_wearing( *this, true ) ) {
+         // flag these mutations to be removed at the start of the next turn
+@@ -9582,6 +9584,8 @@ void Character::on_item_acquire( const item &it )
+         return VisitResponse::NEXT;
+     } );
+ 
++    invalidate_weight_carried_cache();
++
+     if( update_overmap_seen ) {
+         g->update_overmap_seen();
+     }
+@@ -11069,6 +11073,8 @@ bool Character::unload( item_location &loc, bool bypass_activity )
+         return this->i_add_or_drop( e );
+     } );
+ 
++    invalidate_weight_carried_cache();
++
+     if( target->is_magazine() ) {
+         if( bypass_activity ) {
+             unload_activity_actor::unload( *this, targloc );
+diff --git a/src/character_attire.cpp b/src/character_attire.cpp
+index 01c7c65965555..60fa60f01d524 100644
+--- a/src/character_attire.cpp
++++ b/src/character_attire.cpp
+@@ -2431,6 +2431,7 @@ std::vector<pocket_data_with_parent> Character::get_all_pocket_with_parent(
+ void outfit::add_stash( Character &guy, const item &newit, int &remaining_charges,
+                         bool ignore_pkt_settings )
+ {
++    guy.invalidate_weight_carried_cache();
+     if( ignore_pkt_settings ) {
+         // Crawl all pockets regardless of priority
+         // Crawl First : wielded item
+diff --git a/src/consumption.cpp b/src/consumption.cpp
+index 869b1c75f5e40..9cd429e172bbc 100644
+--- a/src/consumption.cpp
++++ b/src/consumption.cpp
+@@ -1815,6 +1815,7 @@ trinary Character::consume( item &target, bool force )
+ 
+         get_event_bus().send<event_type::character_consumes_item>( getID(), target.typeId() );
+ 
++        invalidate_weight_carried_cache();
+         target.on_contents_changed();
+         return !target.count_by_charges() || target.charges <= 0 ? trinary::ALL : trinary::SOME;
+     }
+diff --git a/src/item.cpp b/src/item.cpp
+index 65512015af0f3..87566b3fbd572 100644
+--- a/src/item.cpp
++++ b/src/item.cpp
+@@ -6352,7 +6352,6 @@ void item::on_pickup( Character &p )
+     contents.on_pickup( p, this );
+ 
+     p.flag_encumbrance();
+-    p.invalidate_weight_carried_cache();
+     p.on_item_acquire( *this );
+ }
+ 
+@@ -10702,6 +10701,9 @@ int item::ammo_consume( int qty, const tripoint &pos, Character *carrier )
+     // Consume charges loaded in the item or its magazines
+     if( is_magazine() || uses_magazine() ) {
+         qty -= contents.ammo_consume( qty, pos );
++        if( ammo_capacity( ammo_battery ) == 0 && carrier != nullptr ) {
++            carrier->invalidate_weight_carried_cache();
++        }
+     }
+ 
+     // Dirty fix: activating a container of meds leads here, and used to use up all of the charges.
+@@ -12022,7 +12024,6 @@ int item::fill_with( const item &contained, const int amount,
+                   contained_item.typeId().str(), contained_item.charges, typeId().str() );
+     }
+     on_contents_changed();
+-    get_avatar().invalidate_weight_carried_cache();
+     return num_contained;
+ }
+ 
+diff --git a/src/item_pocket.cpp b/src/item_pocket.cpp
+index 3e88db7b738da..e33acf1704a40 100644
+--- a/src/item_pocket.cpp
++++ b/src/item_pocket.cpp
+@@ -1970,8 +1970,11 @@ void item_pocket::leak( map &here, Character *carrier, const tripoint &pos,
+                 iter->unset_flag( flag_FROM_FROZEN_LIQUID );
+                 iter->on_drop( pos );
+                 here.add_item_or_charges( pos, *iter );
+-                carrier->add_msg_if_player( _( "Liquid leaked out from the %s and dripped onto the ground!" ),
+-                                            this->get_name() );
++                if( carrier != nullptr ) {
++                    carrier->invalidate_weight_carried_cache();
++                    carrier->add_msg_if_player( _( "Liquid leaked out from the %s and dripped onto the ground!" ),
++                                                this->get_name() );
++                }
+             }
+             iter = contents.erase( iter );
+         } else {
+diff --git a/src/itype.cpp b/src/itype.cpp
+index 280ba0e8d9d25..f63cd09117880 100644
+--- a/src/itype.cpp
++++ b/src/itype.cpp
+@@ -210,8 +210,6 @@ std::optional<int> itype::invoke( Character *p, item &it, const tripoint &pos,
+         return 0;
+     }
+     if( p ) {
+-        p->invalidate_weight_carried_cache();
+-
+         const auto ret = use->can_call( *p, it, pos );
+ 
+         if( !ret.success() ) {
+diff --git a/src/iuse_actor.cpp b/src/iuse_actor.cpp
+index 8dc4cb50278f7..8836311b9762d 100644
+--- a/src/iuse_actor.cpp
++++ b/src/iuse_actor.cpp
+@@ -5166,7 +5166,6 @@ std::optional<int> link_up_actor::link_extend_cable( Character *p, item &it,
+                           extended_ptr->type_name(), extension->type_name() );
+     extension.remove_item();
+     p->invalidate_inventory_validity_cache();
+-    p->invalidate_weight_carried_cache();
+     p->drop_invalid_inventory();
+     p->moves -= move_cost;
+     return 0;
+diff --git a/src/visitable.cpp b/src/visitable.cpp
+index b6102c094f545..2402ad9e18264 100644
+--- a/src/visitable.cpp
++++ b/src/visitable.cpp
+@@ -648,6 +648,8 @@ std::list<item> Character::remove_items_with( const
+         return res;
+     }
+ 
++    invalidate_weight_carried_cache();
++
+     // first try and remove items from the inventory
+     res = inv->remove_items_with( filter, count );
+     count -= res.size();
+
+From c4116a55d82187120fa40d7627c1db1e2f0bccc4 Mon Sep 17 00:00:00 2001
+From: Kamayana <pigbuster@gmail.com>
+Date: Sun, 10 Sep 2023 13:55:35 -0500
+Subject: [PATCH 4/5] Add carrier parameter to
+ `move_to_parent_pocket_recursive`
+
+---
+ src/item_pocket.cpp | 32 ++++++++++++++++++++++----------
+ 1 file changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/src/item_pocket.cpp b/src/item_pocket.cpp
+index e33acf1704a40..1f8a90c6bca4f 100644
+--- a/src/item_pocket.cpp
++++ b/src/item_pocket.cpp
+@@ -12,6 +12,7 @@
+ #include "character.h"
+ #include "color.h"
+ #include "crafting.h"
++#include "creature_tracker.h"
+ #include "debug.h"
+ #include "enums.h"
+ #include "flag.h"
+@@ -1735,24 +1736,32 @@ std::optional<item> item_pocket::remove_item( const item_location &it )
+ }
+ 
+ static void move_to_parent_pocket_recursive( const tripoint &pos, item &it,
+-        const item_location &loc )
++        const item_location &loc, Character *carrier )
+ {
+     if( loc ) {
+         item_pocket *parent_pocket = loc.parent_pocket();
+         if( parent_pocket && parent_pocket->can_contain( it ).success() ) {
+-            add_msg( m_bad, _( "Your %1$s falls into your %2$s." ), it.display_name(),
+-                     loc.parent_item()->label( 1 ) );
++            if( carrier ) {
++                carrier->add_msg_if_player( m_bad, _( "Your %1$s falls into your %2$s." ),
++                                            it.display_name(), loc.parent_item()->label( 1 ) );
++            }
+             parent_pocket->insert_item( it );
+             return;
+         }
+         if( loc.where() == item_location::type::container ) {
+-            move_to_parent_pocket_recursive( pos, it, loc.parent_item() );
++            move_to_parent_pocket_recursive( pos, it, loc.parent_item(), carrier );
+             return;
+         }
+     }
+ 
+     map &here = get_map();
+-    add_msg( m_bad, _( "Your %s falls to the ground." ), it.display_name() );
++    if( carrier ) {
++        carrier->invalidate_weight_carried_cache();
++        carrier->add_msg_player_or_npc( m_bad, _( "Your %s falls to the ground." ),
++                                        _( "<npcname>'s %s falls to the ground." ), it.display_name() );
++    } else {
++        add_msg_if_player_sees( pos, m_bad, _( "The %s falls to the ground." ), it.display_name() );
++    }
+     here.add_item_or_charges( pos, it );
+ }
+ 
+@@ -1777,6 +1786,9 @@ void item_pocket::overflow( const tripoint &pos, const item_location &loc )
+         }
+     }
+ 
++    Character *carrier = loc.where_recursive() != item_location::type::character ? nullptr :
++        get_creature_tracker().creature_at<Character>( loc.position() );
++
+     // first remove items that shouldn't be in there anyway
+     std::unordered_map<itype_id, bool> contained_type_validity;
+     for( auto iter = contents.begin(); iter != contents.end(); ) {
+@@ -1786,7 +1798,7 @@ void item_pocket::overflow( const tripoint &pos, const item_location &loc )
+             if( !is_type( pocket_type::MIGRATION ) && can_contain_skip_space_checks( *iter ).success() ) {
+                 ++iter;
+             } else {
+-                move_to_parent_pocket_recursive( pos, *iter, loc );
++                move_to_parent_pocket_recursive( pos, *iter, loc, carrier );
+                 iter = contents.erase( iter );
+             }
+             continue;
+@@ -1801,7 +1813,7 @@ void item_pocket::overflow( const tripoint &pos, const item_location &loc )
+         if( cont_copy_type.first->second ) {
+             ++iter;
+         } else {
+-            move_to_parent_pocket_recursive( pos, *iter, loc );
++            move_to_parent_pocket_recursive( pos, *iter, loc, carrier );
+             iter = contents.erase( iter );
+         }
+     }
+@@ -1828,7 +1840,7 @@ void item_pocket::overflow( const tripoint &pos, const item_location &loc )
+             if( overflow_count > 0 ) {
+                 ammo.charges -= overflow_count;
+                 item dropped_ammo( ammo.typeId(), ammo.birthday(), overflow_count );
+-                move_to_parent_pocket_recursive( pos, *iter, loc );
++                move_to_parent_pocket_recursive( pos, *iter, loc, carrier );
+                 total_qty -= overflow_count;
+             }
+             if( ammo.count() == 0 ) {
+@@ -1847,7 +1859,7 @@ void item_pocket::overflow( const tripoint &pos, const item_location &loc )
+             return left.volume() > right.volume();
+         } );
+         while( remaining_volume() < 0_ml && !contents.empty() ) {
+-            move_to_parent_pocket_recursive( pos, contents.front(), loc );
++            move_to_parent_pocket_recursive( pos, contents.front(), loc, carrier );
+             contents.pop_front();
+         }
+     }
+@@ -1856,7 +1868,7 @@ void item_pocket::overflow( const tripoint &pos, const item_location &loc )
+             return left.weight() > right.weight();
+         } );
+         while( remaining_weight() < 0_gram && !contents.empty() ) {
+-            move_to_parent_pocket_recursive( pos, contents.front(), loc );
++            move_to_parent_pocket_recursive( pos, contents.front(), loc, carrier );
+             contents.pop_front();
+         }
+     }
+
+From 8d6594b070e3ccdfd28b5fa95147dba24075f4d8 Mon Sep 17 00:00:00 2001
+From: Kamayana <pigbuster@gmail.com>
+Date: Fri, 8 Sep 2023 00:48:38 -0500
+Subject: [PATCH 5/5] Recreate swim test results, now that #68033 is fixed
+
+---
+ src/item_pocket.cpp           |   2 +-
+ tests/water_movement_test.cpp | 190 +++++++++++++++++-----------------
+ 2 files changed, 96 insertions(+), 96 deletions(-)
+
+diff --git a/src/item_pocket.cpp b/src/item_pocket.cpp
+index 1f8a90c6bca4f..884e1acf1f4b5 100644
+--- a/src/item_pocket.cpp
++++ b/src/item_pocket.cpp
+@@ -1787,7 +1787,7 @@ void item_pocket::overflow( const tripoint &pos, const item_location &loc )
+     }
+ 
+     Character *carrier = loc.where_recursive() != item_location::type::character ? nullptr :
+-        get_creature_tracker().creature_at<Character>( loc.position() );
++                         get_creature_tracker().creature_at<Character>( loc.position() );
+ 
+     // first remove items that shouldn't be in there anyway
+     std::unordered_map<itype_id, bool> contained_type_validity;
+diff --git a/tests/water_movement_test.cpp b/tests/water_movement_test.cpp
+index e1e7de9e34171..cc56a427da180 100644
+--- a/tests/water_movement_test.cpp
++++ b/tests/water_movement_test.cpp
+@@ -376,11 +376,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: crouch, stats: average, skills: maximum, gear: none, traits: paws", swim_result{30, 9000}},
+     {"move: crouch, stats: average, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 9000}},
+     {"move: crouch, stats: average, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 9000}},
+-    {"move: crouch, stats: average, skills: none, gear: fins, traits: large paws", swim_result{377, 61}},
++    {"move: crouch, stats: average, skills: none, gear: fins, traits: large paws", swim_result{390, 60}},
+     {"move: crouch, stats: average, skills: none, gear: fins, traits: none", swim_result{419, 56}},
+-    {"move: crouch, stats: average, skills: none, gear: fins, traits: paws", swim_result{375, 61}},
+-    {"move: crouch, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{358, 64}},
+-    {"move: crouch, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{358, 64}},
++    {"move: crouch, stats: average, skills: none, gear: fins, traits: paws", swim_result{387, 61}},
++    {"move: crouch, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{370, 64}},
++    {"move: crouch, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{370, 64}},
+     {"move: crouch, stats: average, skills: none, gear: flotation vest, traits: large paws", swim_result{450, 51}},
+     {"move: crouch, stats: average, skills: none, gear: flotation vest, traits: none", swim_result{450, 51}},
+     {"move: crouch, stats: average, skills: none, gear: flotation vest, traits: paws", swim_result{450, 51}},
+@@ -391,16 +391,16 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: crouch, stats: average, skills: none, gear: none, traits: paws", swim_result{384, 62}},
+     {"move: crouch, stats: average, skills: none, gear: none, traits: webbed hands", swim_result{364, 65}},
+     {"move: crouch, stats: average, skills: none, gear: none, traits: webbed hands and feet", swim_result{314, 78}},
+-    {"move: crouch, stats: average, skills: professional, gear: fins, traits: large paws", swim_result{40, 9000}},
++    {"move: crouch, stats: average, skills: professional, gear: fins, traits: large paws", swim_result{53, 9000}},
+     {"move: crouch, stats: average, skills: professional, gear: fins, traits: none", swim_result{105, 9000}},
+-    {"move: crouch, stats: average, skills: professional, gear: fins, traits: paws", swim_result{48, 9000}},
+-    {"move: crouch, stats: average, skills: professional, gear: fins, traits: webbed hands", swim_result{45, 9000}},
+-    {"move: crouch, stats: average, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{45, 9000}},
++    {"move: crouch, stats: average, skills: professional, gear: fins, traits: paws", swim_result{60, 9000}},
++    {"move: crouch, stats: average, skills: professional, gear: fins, traits: webbed hands", swim_result{56, 9000}},
++    {"move: crouch, stats: average, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{56, 9000}},
+     {"move: crouch, stats: average, skills: professional, gear: flotation vest, traits: large paws", swim_result{450, 85}},
+     {"move: crouch, stats: average, skills: professional, gear: flotation vest, traits: none", swim_result{450, 85}},
+     {"move: crouch, stats: average, skills: professional, gear: flotation vest, traits: paws", swim_result{450, 85}},
+     {"move: crouch, stats: average, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{450, 85}},
+-    {"move: crouch, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{424, 90}},
++    {"move: crouch, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{431, 90}},
+     {"move: crouch, stats: average, skills: professional, gear: none, traits: large paws", swim_result{119, 1071}},
+     {"move: crouch, stats: average, skills: professional, gear: none, traits: none", swim_result{160, 413}},
+     {"move: crouch, stats: average, skills: professional, gear: none, traits: paws", swim_result{122, 947}},
+@@ -421,11 +421,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: crouch, stats: maximum, skills: maximum, gear: none, traits: paws", swim_result{30, 9000}},
+     {"move: crouch, stats: maximum, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 9000}},
+     {"move: crouch, stats: maximum, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 9000}},
+-    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: large paws", swim_result{30, 1713}},
++    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: large paws", swim_result{30, 1715}},
+     {"move: crouch, stats: maximum, skills: none, gear: fins, traits: none", swim_result{109, 367}},
+-    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: paws", swim_result{30, 1713}},
+-    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: webbed hands", swim_result{30, 1713}},
+-    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{30, 1713}},
++    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: paws", swim_result{30, 1715}},
++    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: webbed hands", swim_result{30, 1715}},
++    {"move: crouch, stats: maximum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{30, 1715}},
+     {"move: crouch, stats: maximum, skills: none, gear: flotation vest, traits: large paws", swim_result{450, 51}},
+     {"move: crouch, stats: maximum, skills: none, gear: flotation vest, traits: none", swim_result{450, 51}},
+     {"move: crouch, stats: maximum, skills: none, gear: flotation vest, traits: paws", swim_result{450, 51}},
+@@ -441,11 +441,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: crouch, stats: maximum, skills: professional, gear: fins, traits: paws", swim_result{30, 9000}},
+     {"move: crouch, stats: maximum, skills: professional, gear: fins, traits: webbed hands", swim_result{30, 9000}},
+     {"move: crouch, stats: maximum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{30, 9000}},
+-    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{307, 135}},
++    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{315, 135}},
+     {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: none", swim_result{407, 96}},
+-    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{325, 125}},
+-    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{324, 126}},
+-    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{250, 186}},
++    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{332, 125}},
++    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{331, 126}},
++    {"move: crouch, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{251, 186}},
+     {"move: crouch, stats: maximum, skills: professional, gear: none, traits: large paws", swim_result{30, 9000}},
+     {"move: crouch, stats: maximum, skills: professional, gear: none, traits: none", swim_result{40, 9000}},
+     {"move: crouch, stats: maximum, skills: professional, gear: none, traits: paws", swim_result{30, 9000}},
+@@ -466,11 +466,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: crouch, stats: minimum, skills: maximum, gear: none, traits: paws", swim_result{30, 9000}},
+     {"move: crouch, stats: minimum, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 9000}},
+     {"move: crouch, stats: minimum, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 9000}},
+-    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{505, 44}},
++    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{517, 44}},
+     {"move: crouch, stats: minimum, skills: none, gear: fins, traits: none", swim_result{522, 44}},
+-    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{495, 45}},
+-    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{472, 47}},
+-    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{472, 47}},
++    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{507, 45}},
++    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{484, 47}},
++    {"move: crouch, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{484, 47}},
+     {"move: crouch, stats: minimum, skills: none, gear: flotation vest, traits: large paws", swim_result{450, 51}},
+     {"move: crouch, stats: minimum, skills: none, gear: flotation vest, traits: none", swim_result{450, 51}},
+     {"move: crouch, stats: minimum, skills: none, gear: flotation vest, traits: paws", swim_result{450, 51}},
+@@ -481,11 +481,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: crouch, stats: minimum, skills: none, gear: none, traits: paws", swim_result{437, 53}},
+     {"move: crouch, stats: minimum, skills: none, gear: none, traits: webbed hands", swim_result{414, 56}},
+     {"move: crouch, stats: minimum, skills: none, gear: none, traits: webbed hands and feet", swim_result{374, 63}},
+-    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{168, 324}},
++    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{180, 324}},
+     {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: none", swim_result{208, 250}},
+-    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{168, 324}},
+-    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{158, 363}},
+-    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{158, 363}},
++    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{180, 324}},
++    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{170, 363}},
++    {"move: crouch, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{170, 363}},
+     {"move: crouch, stats: minimum, skills: professional, gear: flotation vest, traits: large paws", swim_result{450, 85}},
+     {"move: crouch, stats: minimum, skills: professional, gear: flotation vest, traits: none", swim_result{450, 85}},
+     {"move: crouch, stats: minimum, skills: professional, gear: flotation vest, traits: paws", swim_result{450, 85}},
+@@ -511,11 +511,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: prone, stats: average, skills: maximum, gear: none, traits: paws", swim_result{30, 9000}},
+     {"move: prone, stats: average, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 9000}},
+     {"move: prone, stats: average, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 9000}},
+-    {"move: prone, stats: average, skills: none, gear: fins, traits: large paws", swim_result{377, 197}},
++    {"move: prone, stats: average, skills: none, gear: fins, traits: large paws", swim_result{390, 197}},
+     {"move: prone, stats: average, skills: none, gear: fins, traits: none", swim_result{419, 177}},
+-    {"move: prone, stats: average, skills: none, gear: fins, traits: paws", swim_result{375, 200}},
+-    {"move: prone, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{358, 214}},
+-    {"move: prone, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{358, 214}},
++    {"move: prone, stats: average, skills: none, gear: fins, traits: paws", swim_result{387, 200}},
++    {"move: prone, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{370, 214}},
++    {"move: prone, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{370, 214}},
+     {"move: prone, stats: average, skills: none, gear: flotation vest, traits: large paws", swim_result{450, 160}},
+     {"move: prone, stats: average, skills: none, gear: flotation vest, traits: none", swim_result{450, 160}},
+     {"move: prone, stats: average, skills: none, gear: flotation vest, traits: paws", swim_result{450, 160}},
+@@ -526,16 +526,16 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: prone, stats: average, skills: none, gear: none, traits: paws", swim_result{384, 202}},
+     {"move: prone, stats: average, skills: none, gear: none, traits: webbed hands", swim_result{364, 219}},
+     {"move: prone, stats: average, skills: none, gear: none, traits: webbed hands and feet", swim_result{314, 281}},
+-    {"move: prone, stats: average, skills: professional, gear: fins, traits: large paws", swim_result{40, 9000}},
++    {"move: prone, stats: average, skills: professional, gear: fins, traits: large paws", swim_result{53, 9000}},
+     {"move: prone, stats: average, skills: professional, gear: fins, traits: none", swim_result{105, 9000}},
+-    {"move: prone, stats: average, skills: professional, gear: fins, traits: paws", swim_result{48, 9000}},
+-    {"move: prone, stats: average, skills: professional, gear: fins, traits: webbed hands", swim_result{45, 9000}},
+-    {"move: prone, stats: average, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{45, 9000}},
++    {"move: prone, stats: average, skills: professional, gear: fins, traits: paws", swim_result{60, 9000}},
++    {"move: prone, stats: average, skills: professional, gear: fins, traits: webbed hands", swim_result{56, 9000}},
++    {"move: prone, stats: average, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{56, 9000}},
+     {"move: prone, stats: average, skills: professional, gear: flotation vest, traits: large paws", swim_result{450, 324}},
+     {"move: prone, stats: average, skills: professional, gear: flotation vest, traits: none", swim_result{450, 324}},
+     {"move: prone, stats: average, skills: professional, gear: flotation vest, traits: paws", swim_result{450, 324}},
+     {"move: prone, stats: average, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{450, 324}},
+-    {"move: prone, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{424, 353}},
++    {"move: prone, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{431, 353}},
+     {"move: prone, stats: average, skills: professional, gear: none, traits: large paws", swim_result{119, 9000}},
+     {"move: prone, stats: average, skills: professional, gear: none, traits: none", swim_result{160, 9000}},
+     {"move: prone, stats: average, skills: professional, gear: none, traits: paws", swim_result{122, 9000}},
+@@ -576,11 +576,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: prone, stats: maximum, skills: professional, gear: fins, traits: paws", swim_result{30, 9000}},
+     {"move: prone, stats: maximum, skills: professional, gear: fins, traits: webbed hands", swim_result{30, 9000}},
+     {"move: prone, stats: maximum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{30, 9000}},
+-    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{307, 818}},
++    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{315, 818}},
+     {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: none", swim_result{407, 398}},
+-    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{325, 676}},
+-    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{324, 683}},
+-    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{250, 9000}},
++    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{332, 676}},
++    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{331, 683}},
++    {"move: prone, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{251, 9000}},
+     {"move: prone, stats: maximum, skills: professional, gear: none, traits: large paws", swim_result{30, 9000}},
+     {"move: prone, stats: maximum, skills: professional, gear: none, traits: none", swim_result{40, 9000}},
+     {"move: prone, stats: maximum, skills: professional, gear: none, traits: paws", swim_result{30, 9000}},
+@@ -601,11 +601,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: prone, stats: minimum, skills: maximum, gear: none, traits: paws", swim_result{30, 9000}},
+     {"move: prone, stats: minimum, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 9000}},
+     {"move: prone, stats: minimum, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 9000}},
+-    {"move: prone, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{505, 132}},
++    {"move: prone, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{517, 132}},
+     {"move: prone, stats: minimum, skills: none, gear: fins, traits: none", swim_result{522, 130}},
+-    {"move: prone, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{495, 136}},
+-    {"move: prone, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{472, 144}},
+-    {"move: prone, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{472, 144}},
++    {"move: prone, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{507, 136}},
++    {"move: prone, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{484, 144}},
++    {"move: prone, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{484, 144}},
+     {"move: prone, stats: minimum, skills: none, gear: flotation vest, traits: large paws", swim_result{450, 160}},
+     {"move: prone, stats: minimum, skills: none, gear: flotation vest, traits: none", swim_result{450, 160}},
+     {"move: prone, stats: minimum, skills: none, gear: flotation vest, traits: paws", swim_result{450, 160}},
+@@ -616,11 +616,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: prone, stats: minimum, skills: none, gear: none, traits: paws", swim_result{437, 167}},
+     {"move: prone, stats: minimum, skills: none, gear: none, traits: webbed hands", swim_result{414, 180}},
+     {"move: prone, stats: minimum, skills: none, gear: none, traits: webbed hands and feet", swim_result{374, 210}},
+-    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{168, 9000}},
++    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{180, 9000}},
+     {"move: prone, stats: minimum, skills: professional, gear: fins, traits: none", swim_result{208, 9000}},
+-    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{168, 9000}},
+-    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{158, 9000}},
+-    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{158, 9000}},
++    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{180, 9000}},
++    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{170, 9000}},
++    {"move: prone, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{170, 9000}},
+     {"move: prone, stats: minimum, skills: professional, gear: flotation vest, traits: large paws", swim_result{450, 324}},
+     {"move: prone, stats: minimum, skills: professional, gear: flotation vest, traits: none", swim_result{450, 324}},
+     {"move: prone, stats: minimum, skills: professional, gear: flotation vest, traits: paws", swim_result{450, 324}},
+@@ -646,11 +646,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: run, stats: average, skills: maximum, gear: none, traits: paws", swim_result{30, 59}},
+     {"move: run, stats: average, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 59}},
+     {"move: run, stats: average, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 59}},
+-    {"move: run, stats: average, skills: none, gear: fins, traits: large paws", swim_result{247, 3}},
++    {"move: run, stats: average, skills: none, gear: fins, traits: large paws", swim_result{260, 3}},
+     {"move: run, stats: average, skills: none, gear: fins, traits: none", swim_result{289, 3}},
+-    {"move: run, stats: average, skills: none, gear: fins, traits: paws", swim_result{245, 3}},
+-    {"move: run, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{228, 3}},
+-    {"move: run, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{228, 3}},
++    {"move: run, stats: average, skills: none, gear: fins, traits: paws", swim_result{257, 3}},
++    {"move: run, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{240, 3}},
++    {"move: run, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{240, 3}},
+     {"move: run, stats: average, skills: none, gear: flotation vest, traits: large paws", swim_result{320, 2}},
+     {"move: run, stats: average, skills: none, gear: flotation vest, traits: none", swim_result{320, 2}},
+     {"move: run, stats: average, skills: none, gear: flotation vest, traits: paws", swim_result{320, 2}},
+@@ -670,7 +670,7 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: run, stats: average, skills: professional, gear: flotation vest, traits: none", swim_result{320, 4}},
+     {"move: run, stats: average, skills: professional, gear: flotation vest, traits: paws", swim_result{320, 4}},
+     {"move: run, stats: average, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{320, 4}},
+-    {"move: run, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{294, 4}},
++    {"move: run, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{301, 4}},
+     {"move: run, stats: average, skills: professional, gear: none, traits: large paws", swim_result{30, 39}},
+     {"move: run, stats: average, skills: professional, gear: none, traits: none", swim_result{30, 39}},
+     {"move: run, stats: average, skills: professional, gear: none, traits: paws", swim_result{30, 39}},
+@@ -711,11 +711,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: run, stats: maximum, skills: professional, gear: fins, traits: paws", swim_result{30, 39}},
+     {"move: run, stats: maximum, skills: professional, gear: fins, traits: webbed hands", swim_result{30, 39}},
+     {"move: run, stats: maximum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{30, 39}},
+-    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{177, 6}},
++    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{185, 6}},
+     {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: none", swim_result{277, 4}},
+-    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{195, 6}},
+-    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{194, 6}},
+-    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{120, 10}},
++    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{202, 6}},
++    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{201, 6}},
++    {"move: run, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{121, 10}},
+     {"move: run, stats: maximum, skills: professional, gear: none, traits: large paws", swim_result{30, 39}},
+     {"move: run, stats: maximum, skills: professional, gear: none, traits: none", swim_result{30, 39}},
+     {"move: run, stats: maximum, skills: professional, gear: none, traits: paws", swim_result{30, 39}},
+@@ -736,11 +736,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: run, stats: minimum, skills: maximum, gear: none, traits: paws", swim_result{30, 59}},
+     {"move: run, stats: minimum, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 59}},
+     {"move: run, stats: minimum, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 59}},
+-    {"move: run, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{375, 2}},
++    {"move: run, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{387, 2}},
+     {"move: run, stats: minimum, skills: none, gear: fins, traits: none", swim_result{392, 2}},
+-    {"move: run, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{365, 2}},
+-    {"move: run, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{342, 2}},
+-    {"move: run, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{342, 2}},
++    {"move: run, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{377, 2}},
++    {"move: run, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{354, 2}},
++    {"move: run, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{354, 2}},
+     {"move: run, stats: minimum, skills: none, gear: flotation vest, traits: large paws", swim_result{320, 2}},
+     {"move: run, stats: minimum, skills: none, gear: flotation vest, traits: none", swim_result{320, 2}},
+     {"move: run, stats: minimum, skills: none, gear: flotation vest, traits: paws", swim_result{320, 2}},
+@@ -751,11 +751,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: run, stats: minimum, skills: none, gear: none, traits: paws", swim_result{307, 3}},
+     {"move: run, stats: minimum, skills: none, gear: none, traits: webbed hands", swim_result{284, 3}},
+     {"move: run, stats: minimum, skills: none, gear: none, traits: webbed hands and feet", swim_result{244, 3}},
+-    {"move: run, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{38, 24}},
++    {"move: run, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{50, 23}},
+     {"move: run, stats: minimum, skills: professional, gear: fins, traits: none", swim_result{78, 15}},
+-    {"move: run, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{38, 24}},
+-    {"move: run, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{30, 29}},
+-    {"move: run, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{30, 29}},
++    {"move: run, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{50, 23}},
++    {"move: run, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{40, 29}},
++    {"move: run, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{40, 29}},
+     {"move: run, stats: minimum, skills: professional, gear: flotation vest, traits: large paws", swim_result{320, 4}},
+     {"move: run, stats: minimum, skills: professional, gear: flotation vest, traits: none", swim_result{320, 4}},
+     {"move: run, stats: minimum, skills: professional, gear: flotation vest, traits: paws", swim_result{320, 4}},
+@@ -766,11 +766,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: run, stats: minimum, skills: professional, gear: none, traits: paws", swim_result{45, 26}},
+     {"move: run, stats: minimum, skills: professional, gear: none, traits: webbed hands", swim_result{34, 34}},
+     {"move: run, stats: minimum, skills: professional, gear: none, traits: webbed hands and feet", swim_result{30, 39}},
+-    {"move: walk, stats: average, skills: maximum, gear: fins, traits: large paws", swim_result{30, 3137}},
+-    {"move: walk, stats: average, skills: maximum, gear: fins, traits: none", swim_result{30, 3137}},
+-    {"move: walk, stats: average, skills: maximum, gear: fins, traits: paws", swim_result{30, 3137}},
+-    {"move: walk, stats: average, skills: maximum, gear: fins, traits: webbed hands", swim_result{30, 3137}},
+-    {"move: walk, stats: average, skills: maximum, gear: fins, traits: webbed hands and feet", swim_result{30, 3137}},
++    {"move: walk, stats: average, skills: maximum, gear: fins, traits: large paws", swim_result{30, 3140}},
++    {"move: walk, stats: average, skills: maximum, gear: fins, traits: none", swim_result{30, 3140}},
++    {"move: walk, stats: average, skills: maximum, gear: fins, traits: paws", swim_result{30, 3140}},
++    {"move: walk, stats: average, skills: maximum, gear: fins, traits: webbed hands", swim_result{30, 3140}},
++    {"move: walk, stats: average, skills: maximum, gear: fins, traits: webbed hands and feet", swim_result{30, 3140}},
+     {"move: walk, stats: average, skills: maximum, gear: flotation vest, traits: large paws", swim_result{200, 170}},
+     {"move: walk, stats: average, skills: maximum, gear: flotation vest, traits: none", swim_result{200, 170}},
+     {"move: walk, stats: average, skills: maximum, gear: flotation vest, traits: paws", swim_result{200, 170}},
+@@ -781,11 +781,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: walk, stats: average, skills: maximum, gear: none, traits: paws", swim_result{30, 2624}},
+     {"move: walk, stats: average, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 2624}},
+     {"move: walk, stats: average, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 2624}},
+-    {"move: walk, stats: average, skills: none, gear: fins, traits: large paws", swim_result{327, 33}},
++    {"move: walk, stats: average, skills: none, gear: fins, traits: large paws", swim_result{340, 33}},
+     {"move: walk, stats: average, skills: none, gear: fins, traits: none", swim_result{369, 30}},
+-    {"move: walk, stats: average, skills: none, gear: fins, traits: paws", swim_result{325, 33}},
+-    {"move: walk, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{308, 35}},
+-    {"move: walk, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{308, 35}},
++    {"move: walk, stats: average, skills: none, gear: fins, traits: paws", swim_result{337, 33}},
++    {"move: walk, stats: average, skills: none, gear: fins, traits: webbed hands", swim_result{320, 35}},
++    {"move: walk, stats: average, skills: none, gear: fins, traits: webbed hands and feet", swim_result{320, 35}},
+     {"move: walk, stats: average, skills: none, gear: flotation vest, traits: large paws", swim_result{400, 27}},
+     {"move: walk, stats: average, skills: none, gear: flotation vest, traits: none", swim_result{400, 27}},
+     {"move: walk, stats: average, skills: none, gear: flotation vest, traits: paws", swim_result{400, 27}},
+@@ -805,17 +805,17 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: walk, stats: average, skills: professional, gear: flotation vest, traits: none", swim_result{400, 44}},
+     {"move: walk, stats: average, skills: professional, gear: flotation vest, traits: paws", swim_result{400, 44}},
+     {"move: walk, stats: average, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{400, 44}},
+-    {"move: walk, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{374, 46}},
++    {"move: walk, stats: average, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{381, 46}},
+     {"move: walk, stats: average, skills: professional, gear: none, traits: large paws", swim_result{69, 392}},
+     {"move: walk, stats: average, skills: professional, gear: none, traits: none", swim_result{110, 228}},
+     {"move: walk, stats: average, skills: professional, gear: none, traits: paws", swim_result{72, 374}},
+     {"move: walk, stats: average, skills: professional, gear: none, traits: webbed hands", swim_result{64, 423}},
+     {"move: walk, stats: average, skills: professional, gear: none, traits: webbed hands and feet", swim_result{30, 934}},
+-    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: large paws", swim_result{30, 3137}},
+-    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: none", swim_result{30, 3137}},
+-    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: paws", swim_result{30, 3137}},
+-    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: webbed hands", swim_result{30, 3137}},
+-    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: webbed hands and feet", swim_result{30, 3137}},
++    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: large paws", swim_result{30, 3140}},
++    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: none", swim_result{30, 3140}},
++    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: paws", swim_result{30, 3140}},
++    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: webbed hands", swim_result{30, 3140}},
++    {"move: walk, stats: maximum, skills: maximum, gear: fins, traits: webbed hands and feet", swim_result{30, 3140}},
+     {"move: walk, stats: maximum, skills: maximum, gear: flotation vest, traits: large paws", swim_result{200, 170}},
+     {"move: walk, stats: maximum, skills: maximum, gear: flotation vest, traits: none", swim_result{200, 170}},
+     {"move: walk, stats: maximum, skills: maximum, gear: flotation vest, traits: paws", swim_result{200, 170}},
+@@ -846,21 +846,21 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: walk, stats: maximum, skills: professional, gear: fins, traits: paws", swim_result{30, 964}},
+     {"move: walk, stats: maximum, skills: professional, gear: fins, traits: webbed hands", swim_result{30, 964}},
+     {"move: walk, stats: maximum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{30, 964}},
+-    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{257, 70}},
++    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: large paws", swim_result{265, 70}},
+     {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: none", swim_result{357, 50}},
+-    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{275, 65}},
+-    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{274, 65}},
+-    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{200, 98}},
++    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: paws", swim_result{282, 65}},
++    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands", swim_result{281, 65}},
++    {"move: walk, stats: maximum, skills: professional, gear: flotation vest, traits: webbed hands and feet", swim_result{201, 98}},
+     {"move: walk, stats: maximum, skills: professional, gear: none, traits: large paws", swim_result{30, 934}},
+     {"move: walk, stats: maximum, skills: professional, gear: none, traits: none", swim_result{30, 934}},
+     {"move: walk, stats: maximum, skills: professional, gear: none, traits: paws", swim_result{30, 934}},
+     {"move: walk, stats: maximum, skills: professional, gear: none, traits: webbed hands", swim_result{30, 934}},
+     {"move: walk, stats: maximum, skills: professional, gear: none, traits: webbed hands and feet", swim_result{30, 934}},
+-    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: large paws", swim_result{30, 3137}},
+-    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: none", swim_result{30, 3137}},
+-    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: paws", swim_result{30, 3137}},
+-    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: webbed hands", swim_result{30, 3137}},
+-    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: webbed hands and feet", swim_result{30, 3137}},
++    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: large paws", swim_result{30, 3140}},
++    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: none", swim_result{30, 3140}},
++    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: paws", swim_result{30, 3140}},
++    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: webbed hands", swim_result{30, 3140}},
++    {"move: walk, stats: minimum, skills: maximum, gear: fins, traits: webbed hands and feet", swim_result{30, 3140}},
+     {"move: walk, stats: minimum, skills: maximum, gear: flotation vest, traits: large paws", swim_result{200, 170}},
+     {"move: walk, stats: minimum, skills: maximum, gear: flotation vest, traits: none", swim_result{200, 170}},
+     {"move: walk, stats: minimum, skills: maximum, gear: flotation vest, traits: paws", swim_result{200, 170}},
+@@ -871,11 +871,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: walk, stats: minimum, skills: maximum, gear: none, traits: paws", swim_result{30, 2624}},
+     {"move: walk, stats: minimum, skills: maximum, gear: none, traits: webbed hands", swim_result{30, 2624}},
+     {"move: walk, stats: minimum, skills: maximum, gear: none, traits: webbed hands and feet", swim_result{30, 2624}},
+-    {"move: walk, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{455, 23}},
++    {"move: walk, stats: minimum, skills: none, gear: fins, traits: large paws", swim_result{467, 23}},
+     {"move: walk, stats: minimum, skills: none, gear: fins, traits: none", swim_result{472, 23}},
+-    {"move: walk, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{445, 24}},
+-    {"move: walk, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{422, 25}},
+-    {"move: walk, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{422, 25}},
++    {"move: walk, stats: minimum, skills: none, gear: fins, traits: paws", swim_result{457, 24}},
++    {"move: walk, stats: minimum, skills: none, gear: fins, traits: webbed hands", swim_result{434, 25}},
++    {"move: walk, stats: minimum, skills: none, gear: fins, traits: webbed hands and feet", swim_result{434, 25}},
+     {"move: walk, stats: minimum, skills: none, gear: flotation vest, traits: large paws", swim_result{400, 27}},
+     {"move: walk, stats: minimum, skills: none, gear: flotation vest, traits: none", swim_result{400, 27}},
+     {"move: walk, stats: minimum, skills: none, gear: flotation vest, traits: paws", swim_result{400, 27}},
+@@ -886,11 +886,11 @@ static std::map<std::string, swim_result> expected_results = {
+     {"move: walk, stats: minimum, skills: none, gear: none, traits: paws", swim_result{387, 28}},
+     {"move: walk, stats: minimum, skills: none, gear: none, traits: webbed hands", swim_result{364, 30}},
+     {"move: walk, stats: minimum, skills: none, gear: none, traits: webbed hands and feet", swim_result{324, 34}},
+-    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{118, 176}},
++    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: large paws", swim_result{130, 176}},
+     {"move: walk, stats: minimum, skills: professional, gear: fins, traits: none", swim_result{158, 134}},
+-    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{118, 176}},
+-    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{108, 199}},
+-    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{108, 199}},
++    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: paws", swim_result{130, 176}},
++    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: webbed hands", swim_result{120, 199}},
++    {"move: walk, stats: minimum, skills: professional, gear: fins, traits: webbed hands and feet", swim_result{120, 199}},
+     {"move: walk, stats: minimum, skills: professional, gear: flotation vest, traits: large paws", swim_result{400, 44}},
+     {"move: walk, stats: minimum, skills: professional, gear: flotation vest, traits: none", swim_result{400, 44}},
+     {"move: walk, stats: minimum, skills: professional, gear: flotation vest, traits: paws", swim_result{400, 44}},
