@@ -1,0 +1,30 @@
+From ed7e613368881a4408d69eba8171666d405032da Mon Sep 17 00:00:00 2001
+From: Lalo <52901609+Aeiouuu01234@users.noreply.github.com>
+Date: Sun, 10 Sep 2023 18:38:38 -0600
+Subject: [PATCH] Update weldgas.json
+
+add "category": "tool_magazine" to welding tanks
+---
+ data/json/items/magazine/weldgas.json | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/data/json/items/magazine/weldgas.json b/data/json/items/magazine/weldgas.json
+index f9e2899ac64ed..64f6a03fb60fc 100644
+--- a/data/json/items/magazine/weldgas.json
++++ b/data/json/items/magazine/weldgas.json
+@@ -4,6 +4,7 @@
+     "//": "Hot Max 24012 Acetylene Cylinder",
+     "looks_like": "pressurized_tank",
+     "type": "MAGAZINE",
++    "category": "tool_magazine",
+     "name": { "str": "small welding tank" },
+     "description": "A compact MC size acetylene tank.  It can pressurize up to 10 cubic feet of welding gas.",
+     "weight": "3640 g",
+@@ -25,6 +26,7 @@
+     "//": "Lemorele B Steel Acetylene Cylinder",
+     "looks_like": "pressurized_tank",
+     "type": "MAGAZINE",
++    "category": "tool_magazine",
+     "name": { "str": "welding tank" },
+     "description": "A bulky B size acetylene tank.  It can pressurize up to 40 cubic feet of welding gas.",
+     "weight": "11360 g",
