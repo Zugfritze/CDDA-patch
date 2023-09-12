@@ -1,0 +1,582 @@
+From 5b82741383fba8a4a00f1c6c82208d9e25b87060 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Fri, 1 Sep 2023 19:01:11 +0800
+Subject: [PATCH 01/11] recursively update visibility cache
+
+---
+ src/map.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index cf18541b70f6c..b83cce1a998c7 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -6565,6 +6565,9 @@ void map::update_submaps_with_active_items()
+ void map::update_visibility_cache( const int zlev )
+ {
+     Character &player_character = get_player_character();
++    if ( player_character.pos().z - zlev < fov_3d_z_range && zlev > -OVERMAP_DEPTH ) {
++    	update_visibility_cache( zlev - 1 );
++    }
+     visibility_variables_cache.variables_set = true; // Not used yet
+     visibility_variables_cache.g_light_level = static_cast<int>( g->light_level( zlev ) );
+     visibility_variables_cache.vision_threshold = player_character.get_vision_threshold(
+
+From 26703dae1dbb87b68b8598c8f08f8024c5a0989a Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Sun, 3 Sep 2023 12:41:02 +0800
+Subject: [PATCH 02/11] calc ll and invis for each zlevel
+
+---
+ src/cata_tiles.cpp | 76 +++++++++++++++++++++++++++++++++++++++++++---
+ src/cata_tiles.h   |  1 +
+ 2 files changed, 73 insertions(+), 4 deletions(-)
+
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index daf75e49b31f6..e2a5524e4ee8d 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1745,6 +1745,7 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                 }
+                 // For each layer
+                 for( auto f : drawing_layers ) {
++                    std::map<tripoint, std::pair<lit_level, std::array<bool, 5>>> ll_invis_cache;
+                     // For each tile
+                     for( tile_render_info &p : draw_points[row] ) {
+                         // Skip if z-level less than draw_min_z
+@@ -1754,6 +1755,14 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                         }
+                         tripoint draw_loc = p.com.pos;
+                         draw_loc.z = cur_zlevel;
++
++                        // Calculate ll and invisible if not in cache
++                        if( ll_invis_cache.count( draw_loc ) == 0 ) {
++                            ll_invis_cache[ draw_loc ] = calc_ll_invis( draw_loc );
++                        }
++                        const lit_level ll = ll_invis_cache[ draw_loc ].first;
++                        const std::array<bool, 5> invisible = ll_invis_cache[ draw_loc ].second;
++
+                         if( const tile_render_info::vision_effect * const
+                             var = std::get_if<tile_render_info::vision_effect>( &p.var ) ) {
+                             if( f == &cata_tiles::draw_terrain ) {
+@@ -1766,20 +1775,20 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                                 // Reset height_3d to base when drawing vehicles
+                                 p.com.height_3d = ( cur_zlevel - center.z ) * zlevel_height;
+                                 // Draw
+-                                if( !( this->*f )( draw_loc, var->ll, p.com.height_3d, var->invisible, false ) ) {
++                                if( !( this->*f )( draw_loc, ll, p.com.height_3d, invisible, false ) ) {
+                                     // If no vpart drawn, revert height_3d changes
+                                     p.com.height_3d = temp_height_3d;
+                                 }
+                             } else if( f == &cata_tiles::draw_critter_at ) {
+                                 // Draw
+-                                if( !( this->*f )( draw_loc, var->ll, p.com.height_3d, var->invisible, false ) && do_draw_shadow &&
++                                if( !( this->*f )( draw_loc, ll, p.com.height_3d, invisible, false ) && do_draw_shadow &&
+                                     cur_zlevel == p.com.draw_min_z ) {
+                                     // Draw shadow of flying critters on bottom-most tile if no other critter drawn
+-                                    draw_critter_above( draw_loc, var->ll, p.com.height_3d, var->invisible );
++                                    draw_critter_above( draw_loc, ll, p.com.height_3d, invisible );
+                                 }
+                             } else {
+                                 // Draw
+-                                ( this->*f )( draw_loc, var->ll, p.com.height_3d, var->invisible, false );
++                                ( this->*f )( draw_loc, ll, p.com.height_3d, invisible, false );
+                             }
+                         }
+                     }
+@@ -1930,6 +1939,65 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                   "SDL_RenderSetClipRect failed" );
+ }
+ 
++std::pair<lit_level, std::array<bool, 5>> cata_tiles::calc_ll_invis( const tripoint &draw_loc )
++{
++    avatar &you = get_avatar();
++    map &here = get_map();
++    creature_tracker &creatures = get_creature_tracker();
++    const visibility_variables &cache = here.get_visibility_variables_cache();
++    const point min_visible( you.posx() % SEEX, you.posy() % SEEY );
++    const point max_visible( ( you.posx() % SEEX ) + ( MAPSIZE - 1 ) * SEEX,
++                             ( you.posy() % SEEY ) + ( MAPSIZE - 1 ) * SEEY );
++    const level_cache &ch = here.access_cache( draw_loc.z );
++    const auto apply_visible = [&]( const tripoint & np, const level_cache & ch, map & here ) {
++        return np.y < min_visible.y || np.y > max_visible.y ||
++               np.x < min_visible.x || np.x > max_visible.x ||
++               would_apply_vision_effects( here.get_visibility( ch.visibility_cache[np.x][np.y],
++                                           cache ) );
++    };
++
++    lit_level ll  = lit_level::DARK;
++    // invisible to normal eyes
++    std::array<bool, 5> invisible;
++    invisible[0] = false;
++    tripoint pos = draw_loc;
++    tripoint_abs_ms pos_global = here.getglobal( pos );
++
++    if( draw_loc.y < min_visible.y || draw_loc.y > max_visible.y || draw_loc.x < min_visible.x ||
++        draw_loc.x > max_visible.x ) {
++        if( has_memory_at( pos_global ) ) {
++            ll = lit_level::MEMORIZED;
++            invisible[0] = true;
++        } else if( has_draw_override( pos ) ) {
++            ll = lit_level::DARK;
++            invisible[0] = true;
++        }
++    } else {
++        ll = here.access_cache( draw_loc.z ).visibility_cache[draw_loc.x][draw_loc.y];
++    }
++
++    if( !invisible[0] ) {
++        const visibility_type vis_type = here.get_visibility( ll, cache );
++        if( would_apply_vision_effects( vis_type ) ) {
++            const Creature *critter = creatures.creature_at( pos, true );
++            if( has_draw_override( pos ) || has_memory_at( pos_global ) ||
++                ( critter &&
++                  ( critter->has_flag( mon_flag_ALWAYS_VISIBLE )
++                    || you.sees_with_infrared( *critter )
++                    || you.sees_with_specials( *critter ) ) ) ) {
++                invisible[0] = true;
++            }
++        }
++    }
++    for( int i = 0; i < 4; i++ ) {
++        const tripoint np = pos + neighborhood[i];
++        invisible[1 + i] = apply_visible( np, ch, here );
++    }
++
++    std::pair<lit_level, std::array<bool, 5>> ret( ll, invisible );
++    return ret;
++}
++
+ void cata_tiles::draw_minimap( const point &dest, const tripoint &center, int width, int height )
+ {
+     minimap->set_type( is_isometric() ? pixel_minimap_type::iso : pixel_minimap_type::ortho );
+diff --git a/src/cata_tiles.h b/src/cata_tiles.h
+index 6f48949292cd8..fe807f8d90ca2 100644
+--- a/src/cata_tiles.h
++++ b/src/cata_tiles.h
+@@ -411,6 +411,7 @@ class cata_tiles
+         void draw( const point &dest, const tripoint &center, int width, int height,
+                    std::multimap<point, formatted_text> &overlay_strings,
+                    color_block_overlay_container &color_blocks );
++        std::pair<lit_level, std::array<bool, 5>> calc_ll_invis( const tripoint &draw_loc );
+         void draw_om( const point &dest, const tripoint_abs_omt &center_abs_omt, bool blink );
+ 
+         /** Minimap functionality */
+
+From 25c17782d7f960ae357f8ff9884a64b27a9cc403 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Sun, 3 Sep 2023 14:49:44 +0800
+Subject: [PATCH 03/11] optimization
+
+---
+ src/cata_tiles.cpp | 24 +++++++++++++++++-------
+ 1 file changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index e2a5524e4ee8d..248554ca2b73d 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1756,13 +1756,6 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                         tripoint draw_loc = p.com.pos;
+                         draw_loc.z = cur_zlevel;
+ 
+-                        // Calculate ll and invisible if not in cache
+-                        if( ll_invis_cache.count( draw_loc ) == 0 ) {
+-                            ll_invis_cache[ draw_loc ] = calc_ll_invis( draw_loc );
+-                        }
+-                        const lit_level ll = ll_invis_cache[ draw_loc ].first;
+-                        const std::array<bool, 5> invisible = ll_invis_cache[ draw_loc ].second;
+-
+                         if( const tile_render_info::vision_effect * const
+                             var = std::get_if<tile_render_info::vision_effect>( &p.var ) ) {
+                             if( f == &cata_tiles::draw_terrain ) {
+@@ -1770,6 +1763,23 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                             }
+                         } else if( const tile_render_info::sprite * const
+                                    var = std::get_if<tile_render_info::sprite>( &p.var ) ) {
++
++                            // Get visibility variables
++                            lit_level ll;
++                            std::array<bool, 5> invisible;
++                            if( cur_zlevel == center.z ) {
++                                // For the same z-level, use tile_render_info vars
++                                ll = var->ll;
++                                invisible = var->invisible;
++                            } else {
++                                // Otherwise, recalculate ll and invisible
++                                if( ll_invis_cache.count( draw_loc ) == 0 ) {
++                                    ll_invis_cache[ draw_loc ] = calc_ll_invis( draw_loc );
++                                }
++                                ll = ll_invis_cache[ draw_loc ].first;
++                                invisible = ll_invis_cache[ draw_loc ].second;
++                            }
++
+                             if( f == &cata_tiles::draw_vpart_no_roof || f == &cata_tiles::draw_vpart_roof ) {
+                                 int temp_height_3d = p.com.height_3d;
+                                 // Reset height_3d to base when drawing vehicles
+
+From 339bbb70277648e87222b4758f527fb4eeba5266 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Tue, 5 Sep 2023 03:40:17 +0800
+Subject: [PATCH 04/11] stop calculating visibility every draw
+
+---
+ src/game.cpp | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 5182b23f697ef..9d9b483ac678a 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -3868,11 +3868,6 @@ void game::draw( ui_adaptor &ui )
+         return;
+     }
+ 
+-    //temporary fix for updating visibility for minimap
+-    ter_view_p.z = ( u.pos() + u.view_offset ).z;
+-    m.build_map_cache( ter_view_p.z );
+-    m.update_visibility_cache( ter_view_p.z );
+-
+     werase( w_terrain );
+     void_blink_curses();
+     draw_ter();
+
+From a4d285d05c1371965754408c1c916ea01a0f2ef8 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Thu, 7 Sep 2023 13:18:58 +0800
+Subject: [PATCH 05/11] cache ll and invisible between draws
+
+---
+ src/cata_tiles.cpp |  6 +++++-
+ src/cata_tiles.h   |  8 ++++++++
+ src/map.cpp        | 14 ++++++++++++--
+ 3 files changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index 248554ca2b73d..ad0ef6d95075f 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1745,7 +1745,6 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                 }
+                 // For each layer
+                 for( auto f : drawing_layers ) {
+-                    std::map<tripoint, std::pair<lit_level, std::array<bool, 5>>> ll_invis_cache;
+                     // For each tile
+                     for( tile_render_info &p : draw_points[row] ) {
+                         // Skip if z-level less than draw_min_z
+@@ -2008,6 +2007,11 @@ std::pair<lit_level, std::array<bool, 5>> cata_tiles::calc_ll_invis( const tripo
+     return ret;
+ }
+ 
++void cata_tiles::clear_draw_caches()
++{
++    ll_invis_cache.clear();
++}
++
+ void cata_tiles::draw_minimap( const point &dest, const tripoint &center, int width, int height )
+ {
+     minimap->set_type( is_isometric() ? pixel_minimap_type::iso : pixel_minimap_type::ortho );
+diff --git a/src/cata_tiles.h b/src/cata_tiles.h
+index fe807f8d90ca2..d53a58135a32d 100644
+--- a/src/cata_tiles.h
++++ b/src/cata_tiles.h
+@@ -805,7 +805,15 @@ class cata_tiles
+ 
+         pimpl<pixel_minimap> minimap;
+ 
++        std::map<tripoint, std::pair<lit_level, std::array<bool, 5>>> ll_invis_cache;
++
+     public:
++        // Draw caches persist data between draws to avoid unnecessary recalculations
++        // Any event that would invalidate cached data should also clear it
++        // Currently only includes ll_invis_cache
++        // Performance gain from caching draw_points, overlay_strings and color_blocks is negligible
++        void clear_draw_caches();
++
+         std::string memory_map_mode = "color_pixel_sepia";
+ };
+ 
+diff --git a/src/map.cpp b/src/map.cpp
+index b83cce1a998c7..3c81cf2fa6ff0 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -109,6 +109,11 @@
+ #include "weather.h"
+ #include "weighted_list.h"
+ 
++#if defined(TILES)
++#include "cata_tiles.h" // all animation functions will be pushed out to a cata_tiles function in some manner
++#include "sdltiles.h"
++#endif
++
+ static const ammotype ammo_battery( "battery" );
+ 
+ static const damage_type_id damage_bash( "bash" );
+@@ -6565,8 +6570,8 @@ void map::update_submaps_with_active_items()
+ void map::update_visibility_cache( const int zlev )
+ {
+     Character &player_character = get_player_character();
+-    if ( player_character.pos().z - zlev < fov_3d_z_range && zlev > -OVERMAP_DEPTH ) {
+-    	update_visibility_cache( zlev - 1 );
++    if( player_character.pos().z - zlev < fov_3d_z_range && zlev > -OVERMAP_DEPTH ) {
++        update_visibility_cache( zlev - 1 );
+     }
+     visibility_variables_cache.variables_set = true; // Not used yet
+     visibility_variables_cache.g_light_level = static_cast<int>( g->light_level( zlev ) );
+@@ -6608,6 +6613,11 @@ void map::update_visibility_cache( const int zlev )
+             }
+         }
+     }
++
++#if defined(TILES)
++    // clear previously cached visibility variables from cata_tiles
++    tilecontext->clear_draw_caches();
++#endif
+ }
+ 
+ const visibility_variables &map::get_visibility_variables_cache() const
+
+From e1c8ed6e55c8e4bee31b9708d38d7b873fd6c8c5 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Fri, 8 Sep 2023 01:34:04 +0800
+Subject: [PATCH 06/11] fix look around
+
+---
+ src/game.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 9d9b483ac678a..64ce434af87ab 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -7725,6 +7725,11 @@ look_around_result game::look_around(
+                            get_map().get_abs_sub().x(), get_map().get_abs_sub().y(), center.z );
+             u.view_offset.z = center.z - u.posz();
+             m.invalidate_map_cache( center.z );
++            // Update map and visibility caches at target z-level
++            // Map cache is also built at player z-level to fix player not visible from higher z-levels
++            m.build_map_cache( u.posz() );
++            m.build_map_cache( center.z );
++            m.update_visibility_cache( center.z );
+         } else if( action == "TRAVEL_TO" ) {
+             const std::optional<std::vector<tripoint_bub_ms>> try_route = safe_route_to( u, lp,
+             0,  []( const std::string & msg ) {
+
+From 19831286e6b5cd0cb6ad123ba10a0d170af89094 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Fri, 8 Sep 2023 13:30:34 +0800
+Subject: [PATCH 07/11] update map and visibility during activities
+
+---
+ src/player_activity.cpp | 33 +++++++++++++++++++--------------
+ 1 file changed, 19 insertions(+), 14 deletions(-)
+
+diff --git a/src/player_activity.cpp b/src/player_activity.cpp
+index f9363e15d8d3e..5aab6ea5215d0 100644
+--- a/src/player_activity.cpp
++++ b/src/player_activity.cpp
+@@ -240,23 +240,28 @@ void player_activity::do_turn( Character &you )
+     }
+     // Only do once every two minutes to loosely simulate consume times,
+     // the exact amount of time is added correctly below, here we just want to prevent eating something every second
+-    if( calendar::once_every( 2_minutes ) && *this && !you.is_npc() && type->valid_auto_needs() &&
+-        !you.has_effect( effect_nausea ) ) {
+-        if( you.stomach.contains() <= you.stomach.capacity( you ) / 4 && you.get_kcal_percent() < 0.95f &&
+-            !no_food_nearby_for_auto_consume ) {
+-            int consume_moves = get_auto_consume_moves( you, true );
+-            moves_left += consume_moves;
+-            if( consume_moves == 0 ) {
+-                no_food_nearby_for_auto_consume = true;
++    if( calendar::once_every( 2_minutes ) && *this && !you.is_npc() ) {
++        if( type->valid_auto_needs() && !you.has_effect( effect_nausea ) ) {
++            if( you.stomach.contains() <= you.stomach.capacity( you ) / 4 && you.get_kcal_percent() < 0.95f &&
++                !no_food_nearby_for_auto_consume ) {
++                int consume_moves = get_auto_consume_moves( you, true );
++                moves_left += consume_moves;
++                if( consume_moves == 0 ) {
++                    no_food_nearby_for_auto_consume = true;
++                }
+             }
+-        }
+-        if( you.get_thirst() > 130 && !no_drink_nearby_for_auto_consume ) {
+-            int consume_moves = get_auto_consume_moves( you, false );
+-            moves_left += consume_moves;
+-            if( consume_moves == 0 ) {
+-                no_drink_nearby_for_auto_consume = true;
++            if( you.get_thirst() > 130 && !no_drink_nearby_for_auto_consume ) {
++                int consume_moves = get_auto_consume_moves( you, false );
++                moves_left += consume_moves;
++                if( consume_moves == 0 ) {
++                    no_drink_nearby_for_auto_consume = true;
++                }
+             }
+         }
++        // Also update map and visibility caches every 2 minutes
++        map &here = get_map();
++        here.build_map_cache( you.pos().z );
++        here.update_visibility_cache( you.pos().z );
+     }
+     const float activity_mult = you.exertion_adjusted_move_multiplier( exertion_level() );
+     if( type->based_on() == based_on_type::TIME ) {
+
+From 82399de4342c5df76d6b220d993c1357b0aecc66 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Fri, 8 Sep 2023 14:05:50 +0800
+Subject: [PATCH 08/11] update map cache on input
+
+---
+ src/handle_action.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/handle_action.cpp b/src/handle_action.cpp
+index 26a1407db1ddc..06f5693c93f6c 100644
+--- a/src/handle_action.cpp
++++ b/src/handle_action.cpp
+@@ -260,6 +260,7 @@ input_context game::get_player_input( std::string &action )
+         ctxt = get_default_mode_input_context();
+     }
+ 
++    m.build_map_cache( u.posz() );
+     m.update_visibility_cache( u.posz() );
+     const visibility_variables &cache = m.get_visibility_variables_cache();
+     const level_cache &map_cache = m.get_cache_ref( u.posz() );
+
+From ba77fb10f9b372f59dcfce8de43f53b2a809253d Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Sun, 10 Sep 2023 20:19:57 +0800
+Subject: [PATCH 09/11] move ll_invis_cache to map class
+
+fixes segfault during tests
+---
+ src/cata_tiles.cpp | 10 +++++-----
+ src/cata_tiles.h   |  2 --
+ src/map.h          |  2 ++
+ 3 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index ad0ef6d95075f..7575d03fff69b 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1772,11 +1772,11 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                                 invisible = var->invisible;
+                             } else {
+                                 // Otherwise, recalculate ll and invisible
+-                                if( ll_invis_cache.count( draw_loc ) == 0 ) {
+-                                    ll_invis_cache[ draw_loc ] = calc_ll_invis( draw_loc );
++                                if( here.ll_invis_cache.count( draw_loc ) == 0 ) {
++                                    here.ll_invis_cache[ draw_loc ] = calc_ll_invis( draw_loc );
+                                 }
+-                                ll = ll_invis_cache[ draw_loc ].first;
+-                                invisible = ll_invis_cache[ draw_loc ].second;
++                                ll = here.ll_invis_cache[ draw_loc ].first;
++                                invisible = here.ll_invis_cache[ draw_loc ].second;
+                             }
+ 
+                             if( f == &cata_tiles::draw_vpart_no_roof || f == &cata_tiles::draw_vpart_roof ) {
+@@ -2009,7 +2009,7 @@ std::pair<lit_level, std::array<bool, 5>> cata_tiles::calc_ll_invis( const tripo
+ 
+ void cata_tiles::clear_draw_caches()
+ {
+-    ll_invis_cache.clear();
++    get_map().ll_invis_cache.clear();
+ }
+ 
+ void cata_tiles::draw_minimap( const point &dest, const tripoint &center, int width, int height )
+diff --git a/src/cata_tiles.h b/src/cata_tiles.h
+index d53a58135a32d..88bcc9ee693cc 100644
+--- a/src/cata_tiles.h
++++ b/src/cata_tiles.h
+@@ -805,8 +805,6 @@ class cata_tiles
+ 
+         pimpl<pixel_minimap> minimap;
+ 
+-        std::map<tripoint, std::pair<lit_level, std::array<bool, 5>>> ll_invis_cache;
+-
+     public:
+         // Draw caches persist data between draws to avoid unnecessary recalculations
+         // Any event that would invalidate cached data should also clear it
+diff --git a/src/map.h b/src/map.h
+index 78730251b0e22..049965bad7e8e 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -2277,6 +2277,8 @@ class map
+ 
+         bool has_haulable_items( const tripoint &pos );
+         std::vector<item_location> get_haulable_items( const tripoint &pos );
++
++        std::map<tripoint, std::pair<lit_level, std::array<bool, 5>>> ll_invis_cache;
+ };
+ 
+ map &get_map();
+
+From 68cc94730a29e4c0a64ed993ce002c0440cdc289 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Tue, 12 Sep 2023 12:03:29 +0800
+Subject: [PATCH 10/11] clean up and comment
+
+---
+ src/cata_tiles.cpp | 1 -
+ src/cata_tiles.h   | 2 ++
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index 7575d03fff69b..096273bfcebfe 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1754,7 +1754,6 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                         }
+                         tripoint draw_loc = p.com.pos;
+                         draw_loc.z = cur_zlevel;
+-
+                         if( const tile_render_info::vision_effect * const
+                             var = std::get_if<tile_render_info::vision_effect>( &p.var ) ) {
+                             if( f == &cata_tiles::draw_terrain ) {
+diff --git a/src/cata_tiles.h b/src/cata_tiles.h
+index 88bcc9ee693cc..b4ea1ab2458aa 100644
+--- a/src/cata_tiles.h
++++ b/src/cata_tiles.h
+@@ -411,6 +411,8 @@ class cata_tiles
+         void draw( const point &dest, const tripoint &center, int width, int height,
+                    std::multimap<point, formatted_text> &overlay_strings,
+                    color_block_overlay_container &color_blocks );
++        // Standalone version of the ll and invisible calculations normally done when accumulating draw_points
++        // Used to determine visibility of lower z-levels in 3D vision without generating extra draw_points and overlay_strings
+         std::pair<lit_level, std::array<bool, 5>> calc_ll_invis( const tripoint &draw_loc );
+         void draw_om( const point &dest, const tripoint_abs_omt &center_abs_omt, bool blink );
+ 
+
+From 1ef247f14845be70f53b08dacb731599b37bab0d Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Tue, 12 Sep 2023 22:31:51 +0800
+Subject: [PATCH 11/11] disable ll_invis_cache in tests
+
+experimental fix for Cataclysm-test-vcpkg-static-Release-x64 timeout
+---
+ src/cata_tiles.cpp | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index 096273bfcebfe..520ebe54ce9dd 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1772,10 +1772,17 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                             } else {
+                                 // Otherwise, recalculate ll and invisible
+                                 if( here.ll_invis_cache.count( draw_loc ) == 0 ) {
+-                                    here.ll_invis_cache[ draw_loc ] = calc_ll_invis( draw_loc );
++                                    const std::pair<lit_level, std::array<bool, 5>> ll_invis = calc_ll_invis( draw_loc );
++                                    ll = ll_invis.first;
++                                    invisible = ll_invis.second;
++                                    // Only cache ll_invis if not in test mode
++                                    if( !test_mode ) {
++                                        here.ll_invis_cache[ draw_loc ] = ll_invis;
++                                    }
++                                } else {
++                                    ll = here.ll_invis_cache[ draw_loc ].first;
++                                    invisible = here.ll_invis_cache[ draw_loc ].second;
+                                 }
+-                                ll = here.ll_invis_cache[ draw_loc ].first;
+-                                invisible = here.ll_invis_cache[ draw_loc ].second;
+                             }
+ 
+                             if( f == &cata_tiles::draw_vpart_no_roof || f == &cata_tiles::draw_vpart_roof ) {
