@@ -1,0 +1,135 @@
+From a6b432af1147522438ac70fdc9773e499d5f878f Mon Sep 17 00:00:00 2001
+From: Zugfritze <70323844+Zugfritze@users.noreply.github.com>
+Date: Thu, 14 Sep 2023 14:16:54 +0800
+Subject: [PATCH] =?UTF-8?q?=E7=8B=BC=E4=BA=BA=E5=A2=9E=E5=BC=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ data/json/bionics.json             | 10 ----------
+ data/json/mutations/mutations.json | 11 +++--------
+ 2 files changed, 3 insertions(+), 18 deletions(-)
+
+diff --git a/data/json/bionics.json b/data/json/bionics.json
+index 7868e59452..81ee210a00 100644
+--- a/data/json/bionics.json
++++ b/data/json/bionics.json
+@@ -81,7 +81,6 @@
+       "LIGHTFUR",
+       "FUR",
+       "URSINE_FUR",
+-      "LUPINE_FUR",
+       "FELINE_FUR",
+       "LYNX_FUR",
+       "CHITIN",
+@@ -135,9 +134,7 @@
+       "ACIDPROOF",
+       "TOXICFLESH",
+       "FRESHWATEROSMOSIS",
+-      "PAWS",
+       "PAWS_LARGE",
+-      "NAILS",
+       "TALONS",
+       "CLAWS",
+       "CLAWS_RETRACT",
+@@ -201,7 +198,6 @@
+       "LIGHTFUR",
+       "FUR",
+       "URSINE_FUR",
+-      "LUPINE_FUR",
+       "FELINE_FUR",
+       "LYNX_FUR",
+       "CHITIN",
+@@ -256,7 +252,6 @@
+       "HAIRROOTS",
+       "SNOUT",
+       "MINOTAUR",
+-      "MUZZLE",
+       "MUZZLE_BEAR",
+       "MUZZLE_RAT",
+       "MUZZLE_LONG",
+@@ -271,7 +266,6 @@
+       "GIZZARD",
+       "FELINE_EARS",
+       "CANINE_EARS",
+-      "LUPINE_EARS",
+       "RABBIT_EARS",
+       "MOUSE_EARS",
+       "PATCHSKIN1",
+@@ -328,7 +322,6 @@
+       "LIGHTFUR",
+       "FUR",
+       "URSINE_FUR",
+-      "LUPINE_FUR",
+       "FELINE_FUR",
+       "LYNX_FUR",
+       "CHITIN",
+@@ -375,14 +368,12 @@
+       "TAIL_RAT",
+       "TAIL_THICK",
+       "TAIL_RAPTOR",
+-      "TAIL_FLUFFY",
+       "TAIL_STING",
+       "TAIL_CLUB",
+       "LEG_TENTACLES",
+       "LEG_TENT_BRACE",
+       "RAP_TALONS",
+       "HOOVES",
+-      "PADDED_FEET",
+       "PATCHSKIN1",
+       "PATCHSKIN2",
+       "RABBIT_FUR",
+@@ -431,7 +422,6 @@
+       "LIGHTFUR",
+       "FUR",
+       "URSINE_FUR",
+-      "LUPINE_FUR",
+       "FELINE_FUR",
+       "LYNX_FUR",
+       "CHITIN",
+diff --git a/data/json/mutations/mutations.json b/data/json/mutations/mutations.json
+index cc24f307f5..f21743bf26 100644
+--- a/data/json/mutations/mutations.json
++++ b/data/json/mutations/mutations.json
+@@ -4646,11 +4646,10 @@
+     "name": { "str": "Fluffy Tail" },
+     "points": 1,
+     "visibility": 7,
+-    "description": "You have a long, fluffy-furred tail.  It greatly improves your balance, making your ability to dodge much higher.  Prevents wearing non-fabric pants.",
++    "description": "你有一根长长的毛茸茸的尾巴，它极大地提高你的平衡，使你的闪避能力提高。",
+     "types": [ "TAIL" ],
+     "prereqs": [ "TAIL_LONG" ],
+     "category": [ "LUPINE" ],
+-    "restricts_gear": [ "leg_hip_l", "leg_hip_r" ],
+     "allowed_items": [ "ALLOWS_TAIL" ],
+     "allow_soft_gear": true,
+     "social_modifiers": { "lie": -20, "persuade": 10 },
+@@ -6306,11 +6305,10 @@
+     "visibility": 5,
+     "ugliness": 4,
+     "mixed_effect": true,
+-    "description": "Your jaw and nose have extended into a wolfish muzzle.  It lends itself to biting in combat and looks impressive, but prevents wearing mouthgear.",
++    "description": "你的下巴和鼻子都发生了变异，变得和狼一样。这让你能在战斗中狠狠地咬敌人一口，而且看着也很引入注目。",
+     "types": [ "MUZZLE" ],
+     "prereqs": [ "SNOUT" ],
+     "category": [ "BEAST", "LUPINE" ],
+-    "restricts_gear": [ "mouth" ],
+     "social_modifiers": { "intimidate": 6 },
+     "attacks": {
+       "attack_text_u": "You nip at %s!",
+@@ -6770,10 +6768,7 @@
+     "visibility": 3,
+     "ugliness": 2,
+     "mixed_effect": true,
+-    "description": "Your hands have fused into quasi-paws.  Fine manipulation is a challenge: permanent hand encumbrance of 10, difficulty with delicate craftwork, and your gloves don't fit.  But they handle water better and bear weight well, allowing you to move on all fours when crouching and unarmed.",
+-    "encumbrance_always": [ [ "hand_l", 10 ], [ "hand_r", 10 ] ],
+-    "restricts_gear": [ "hand_l", "hand_r" ],
+-    "craft_skill_bonus": [ [ "electronics", -2 ], [ "tailor", -2 ], [ "mechanics", -2 ] ],
++    "description": "你的双手变成了爪子：更适应于游泳，可以更好地负重，也能让你在没穿装备时用四肢匍匐行进。",
+     "types": [ "HANDS" ],
+     "prereqs": [ "NAILS", "CLAWS", "CLAWS_RETRACT", "CLAWS_RAT" ],
+     "cancels": [ "TALONS" ],
+-- 
+2.42.0.windows.2
+
