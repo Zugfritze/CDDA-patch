@@ -1,7 +1,7 @@
 From 9ae30d54a158d94fc6e325a62a09a6a7362fc6ed Mon Sep 17 00:00:00 2001
 From: Rewryte <129854247+Rewryte@users.noreply.github.com>
 Date: Fri, 15 Sep 2023 03:07:13 +0800
-Subject: [PATCH 1/2] add visibility update
+Subject: [PATCH 1/6] add visibility update
 
 ---
  src/game.cpp | 4 ++++
@@ -26,7 +26,7 @@ index 7916b24d0b63e..dfb9a33bd0c04 100644
 From 95618086b24945b746d40e215fe37d52bfd1a3ef Mon Sep 17 00:00:00 2001
 From: Rewryte <129854247+Rewryte@users.noreply.github.com>
 Date: Fri, 15 Sep 2023 03:42:46 +0800
-Subject: [PATCH 2/2] vis update when peeking
+Subject: [PATCH 2/6] vis update when peeking
 
 ---
  src/game.cpp | 4 ++++
@@ -47,3 +47,540 @@ index dfb9a33bd0c04..28388a685294d 100644
      look_around_result result;
      const look_around_params looka_params = { true, center, center, false, false, true };
      if( is_standup_peek ) {   // Non moving peek from crouch is a standup peek
+
+From 96eafa865017998a6a63a20de2e41f740f69c412 Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Fri, 15 Sep 2023 13:56:42 +0800
+Subject: [PATCH 3/6] fix autodrive visibility
+
+---
+ src/activity_actor.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/activity_actor.cpp b/src/activity_actor.cpp
+index 5fef84ebdc7d4..1e930676ae470 100644
+--- a/src/activity_actor.cpp
++++ b/src/activity_actor.cpp
+@@ -545,6 +545,13 @@ void autodrive_activity_actor::start( player_activity &, Character &who )
+ 
+ void autodrive_activity_actor::do_turn( player_activity &act, Character &who )
+ {
++    // Rebuild vision caches if driver is player
++    if( who.is_avatar() ) {
++        map &here = get_map();
++        here.build_map_cache( who.pos().z );
++        here.update_visibility_cache( who.pos().z );
++    }
++
+     if( who.in_vehicle && who.controlling_vehicle && player_vehicle ) {
+         if( who.moves <= 0 ) {
+             // out of moves? the driver's not doing anything this turn
+
+From c1d77e7d17710e1964666f910eb26676d417093d Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Sun, 17 Sep 2023 20:11:16 +0800
+Subject: [PATCH 4/6] revert visibility optimization
+
+---
+ src/activity_actor.cpp |  7 -------
+ src/game.cpp           | 17 ++++-------------
+ src/handle_action.cpp  |  1 -
+ 3 files changed, 4 insertions(+), 21 deletions(-)
+
+diff --git a/src/activity_actor.cpp b/src/activity_actor.cpp
+index 1e930676ae470..5fef84ebdc7d4 100644
+--- a/src/activity_actor.cpp
++++ b/src/activity_actor.cpp
+@@ -545,13 +545,6 @@ void autodrive_activity_actor::start( player_activity &, Character &who )
+ 
+ void autodrive_activity_actor::do_turn( player_activity &act, Character &who )
+ {
+-    // Rebuild vision caches if driver is player
+-    if( who.is_avatar() ) {
+-        map &here = get_map();
+-        here.build_map_cache( who.pos().z );
+-        here.update_visibility_cache( who.pos().z );
+-    }
+-
+     if( who.in_vehicle && who.controlling_vehicle && player_vehicle ) {
+         if( who.moves <= 0 ) {
+             // out of moves? the driver's not doing anything this turn
+diff --git a/src/game.cpp b/src/game.cpp
+index 28388a685294d..35b0433611e8e 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -3880,6 +3880,10 @@ void game::draw( ui_adaptor &ui )
+         return;
+     }
+ 
++    ter_view_p.z = ( u.pos() + u.view_offset ).z;
++    m.build_map_cache( ter_view_p.z );
++    m.update_visibility_cache( ter_view_p.z );
++
+     werase( w_terrain );
+     void_blink_curses();
+     draw_ter();
+@@ -6276,10 +6280,6 @@ void game::peek( const tripoint &p )
+     const bool is_standup_peek = is_same_pos && u.is_crouching();
+     tripoint center = p;
+ 
+-    // Update map and visibility caches
+-    m.build_map_cache( p.z );
+-    m.update_visibility_cache( p.z );
+-
+     look_around_result result;
+     const look_around_params looka_params = { true, center, center, false, false, true };
+     if( is_standup_peek ) {   // Non moving peek from crouch is a standup peek
+@@ -7741,11 +7741,6 @@ look_around_result game::look_around(
+                            get_map().get_abs_sub().x(), get_map().get_abs_sub().y(), center.z );
+             u.view_offset.z = center.z - u.posz();
+             m.invalidate_map_cache( center.z );
+-            // Update map and visibility caches at target z-level
+-            // Map cache is also built at player z-level to fix player not visible from higher z-levels
+-            m.build_map_cache( u.posz() );
+-            m.build_map_cache( center.z );
+-            m.update_visibility_cache( center.z );
+         } else if( action == "TRAVEL_TO" ) {
+             const std::optional<std::vector<tripoint_bub_ms>> try_route = safe_route_to( u, lp,
+             0,  []( const std::string & msg ) {
+@@ -10538,10 +10533,6 @@ bool game::walk_move( const tripoint &dest_loc, const bool via_ramp, const bool
+     if( moving ) {
+         cata_event_dispatch::avatar_moves( old_abs_pos, u, m );
+ 
+-        // Update map and visibility caches
+-        m.build_map_cache( u.posz() );
+-        m.update_visibility_cache( u.posz() );
+-
+         // Add trail animation when sprinting
+         if( get_option<bool>( "ANIMATIONS" ) && u.is_running() ) {
+             if( u.posy() < oldpos.y ) {
+diff --git a/src/handle_action.cpp b/src/handle_action.cpp
+index b3b773fa4bbd3..61f2d8610cdce 100644
+--- a/src/handle_action.cpp
++++ b/src/handle_action.cpp
+@@ -260,7 +260,6 @@ input_context game::get_player_input( std::string &action )
+         ctxt = get_default_mode_input_context();
+     }
+ 
+-    m.build_map_cache( u.posz() );
+     m.update_visibility_cache( u.posz() );
+     const visibility_variables &cache = m.get_visibility_variables_cache();
+     const level_cache &map_cache = m.get_cache_ref( u.posz() );
+
+From b52cd5982736bd7a563b0ce67f035fde3ee4cd6d Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Wed, 20 Sep 2023 12:34:27 +0800
+Subject: [PATCH 5/6] only cache tile visibility on access
+
+---
+ src/level_cache.cpp |  1 -
+ src/level_cache.h   |  2 +-
+ src/lightmap.cpp    | 91 +++++++++++++++++++++++++--------------------
+ src/map.cpp         | 26 +------------
+ src/map.h           |  3 +-
+ 5 files changed, 54 insertions(+), 69 deletions(-)
+
+diff --git a/src/level_cache.cpp b/src/level_cache.cpp
+index 7ff0657a65a13..243c8616c410a 100644
+--- a/src/level_cache.cpp
++++ b/src/level_cache.cpp
+@@ -18,7 +18,6 @@ level_cache::level_cache()
+     std::fill_n( &vision_transparency_cache[0][0], map_dimensions, 0.0f );
+     std::fill_n( &seen_cache[0][0], map_dimensions, 0.0f );
+     std::fill_n( &camera_cache[0][0], map_dimensions, 0.0f );
+-    std::fill_n( &visibility_cache[0][0], map_dimensions, lit_level::DARK );
+     clear_vehicle_cache();
+ }
+ 
+diff --git a/src/level_cache.h b/src/level_cache.h
+index 427d41cac611e..1835dbb21ec43 100644
+--- a/src/level_cache.h
++++ b/src/level_cache.h
+@@ -83,7 +83,7 @@ struct level_cache {
+             cata::make_value<reachability_cache_vertical>();
+ 
+         // stores resulting apparent brightness to player, calculated by map::apparent_light_at
+-        cata::mdarray<lit_level, point_bub_ms> visibility_cache;
++        std::map<tripoint, lit_level> visibility_cache;
+         std::bitset<MAPSIZE_X *MAPSIZE_Y> map_memory_cache_dec;
+         std::bitset<MAPSIZE_X *MAPSIZE_Y> map_memory_cache_ter;
+         std::bitset<MAPSIZE *MAPSIZE> field_cache;
+diff --git a/src/lightmap.cpp b/src/lightmap.cpp
+index 0390217ec1e90..5916a452f8c87 100644
+--- a/src/lightmap.cpp
++++ b/src/lightmap.cpp
+@@ -729,51 +729,60 @@ map::apparent_light_info map::apparent_light_helper( const level_cache &map_cach
+     return { obstructed, abs_obstructed, apparent_light };
+ }
+ 
+-lit_level map::apparent_light_at( const tripoint &p, const visibility_variables &cache ) const
++lit_level map::apparent_light_at( const tripoint &p, const visibility_variables &cache,
++                                  const bool &recalc ) const
+ {
+-    Character &player_character = get_player_character();
+-    const int dist = rl_dist( player_character.pos(), p );
+-
+-    // Clairvoyance overrides everything.
+-    if( cache.u_clairvoyance > 0 && dist <= cache.u_clairvoyance ) {
+-        return lit_level::BRIGHT;
+-    }
+-    if( cache.clairvoyance_field && field_at( p ).find_field( *cache.clairvoyance_field ) ) {
+-        return lit_level::BRIGHT;
+-    }
+-    const level_cache &map_cache = get_cache_ref( p.z );
+-    const apparent_light_info a = apparent_light_helper( map_cache, p );
+-
+-    // Unimpaired range is an override to strictly limit vision range based on various conditions,
+-    // but the player can still see light sources
+-    if( dist > player_character.unimpaired_range() && map_cache.camera_cache[p.x][p.y] == 0.0 ) {
+-        if( !a.abs_obstructed && map_cache.sm[p.x][p.y] > 0.0 ) {
+-            return lit_level::BRIGHT_ONLY;
+-        }
+-        return lit_level::BLANK;
+-    }
+-
+-    if( a.obstructed ) {
+-        if( a.apparent_light > LIGHT_AMBIENT_LIT ) {
+-            if( a.apparent_light > cache.g_light_level ) {
+-                // This represents too hazy to see detail,
+-                // but enough light getting through to illuminate.
+-                return lit_level::BRIGHT_ONLY;
++    auto &visibility_cache = get_cache( p.z ).visibility_cache;
++    if( visibility_cache.count( p ) == 0 || recalc ) {
++    	// Tile not found in cache, so calculate and store it
++
++        lit_level ll = lit_level::DARK;
++        Character &player_character = get_player_character();
++        const int dist = rl_dist( player_character.pos(), p );
++
++        // Clairvoyance overrides everything.
++        if( cache.u_clairvoyance > 0 && dist <= cache.u_clairvoyance ) {
++            ll = lit_level::BRIGHT;
++        } else if( cache.clairvoyance_field && field_at( p ).find_field( *cache.clairvoyance_field ) ) {
++            ll = lit_level::BRIGHT;
++        } else {
++            const level_cache &map_cache = get_cache_ref( p.z );
++            const apparent_light_info a = apparent_light_helper( map_cache, p );
++
++            // Unimpaired range is an override to strictly limit vision range based on various conditions,
++            // but the player can still see light sources
++            if( dist > player_character.unimpaired_range() && map_cache.camera_cache[p.x][p.y] == 0.0 ) {
++                if( !a.abs_obstructed && map_cache.sm[p.x][p.y] > 0.0 ) {
++                    ll = lit_level::BRIGHT_ONLY;
++                } else {
++                    ll = lit_level::BLANK;
++                }
++            } else if( a.obstructed ) {
++                if( a.apparent_light > LIGHT_AMBIENT_LIT ) {
++                    if( a.apparent_light > cache.g_light_level ) {
++                        // This represents too hazy to see detail,
++                        // but enough light getting through to illuminate.
++                        ll = lit_level::BRIGHT_ONLY;
++                    }
++                } else {
++                    ll = lit_level::BLANK;
++                }
++                // Then we just search for the light level in descending order.
++            } else if( a.apparent_light > LIGHT_SOURCE_BRIGHT || map_cache.sm[p.x][p.y] > 0.0 ) {
++                ll = lit_level::BRIGHT;
++            } else if( a.apparent_light > LIGHT_AMBIENT_LIT ) {
++                ll = lit_level::LIT;
++            } else if( a.apparent_light >= cache.vision_threshold ) {
++                ll = lit_level::LOW;
++            } else {
++                ll = lit_level::BLANK;
+             }
+         }
+-        return lit_level::BLANK;
+-    }
+-    // Then we just search for the light level in descending order.
+-    if( a.apparent_light > LIGHT_SOURCE_BRIGHT || map_cache.sm[p.x][p.y] > 0.0 ) {
+-        return lit_level::BRIGHT;
+-    }
+-    if( a.apparent_light > LIGHT_AMBIENT_LIT ) {
+-        return lit_level::LIT;
+-    }
+-    if( a.apparent_light >= cache.vision_threshold ) {
+-        return lit_level::LOW;
++        visibility_cache[p] = ll;
++        return ll;
+     } else {
+-        return lit_level::BLANK;
++        // Retrieve from cache if already exists
++        return visibility_cache[p];
+     }
+ }
+ 
+diff --git a/src/map.cpp b/src/map.cpp
+index 3c81cf2fa6ff0..bbba66cb7c998 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -6587,32 +6587,8 @@ void map::update_visibility_cache( const int zlev )
+         visibility_variables_cache.clairvoyance_field = field_fd_clairvoyant;
+     }
+ 
+-    cata::mdarray<int, point_bub_sm> sm_squares_seen = {};
++    get_cache( zlev ).visibility_cache.clear();
+ 
+-    auto &visibility_cache = get_cache( zlev ).visibility_cache;
+-
+-    tripoint p;
+-    p.z = zlev;
+-    int &x = p.x;
+-    int &y = p.y;
+-    for( x = 0; x < MAPSIZE_X; x++ ) {
+-        for( y = 0; y < MAPSIZE_Y; y++ ) {
+-            lit_level ll = apparent_light_at( p, visibility_variables_cache );
+-            visibility_cache[x][y] = ll;
+-            sm_squares_seen[ x / SEEX ][ y / SEEY ] += ( ll == lit_level::BRIGHT || ll == lit_level::LIT );
+-        }
+-    }
+-
+-    for( int gridx = 0; gridx < my_MAPSIZE; gridx++ ) {
+-        for( int gridy = 0; gridy < my_MAPSIZE; gridy++ ) {
+-            if( sm_squares_seen[gridx][gridy] > 36 ) { // 25% of the submap is visible
+-                const tripoint sm( gridx, gridy, 0 );
+-                const tripoint_abs_sm abs_sm = map::abs_sub + sm;
+-                const tripoint_abs_omt abs_omt = project_to<coords::omt>( abs_sm );
+-                overmap_buffer.set_seen( abs_omt, true );
+-            }
+-        }
+-    }
+ 
+ #if defined(TILES)
+     // clear previously cached visibility variables from cata_tiles
+diff --git a/src/map.h b/src/map.h
+index 049965bad7e8e..6c2b9e3957c19 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -393,7 +393,8 @@ class map
+          * @param p The tile on this map to draw.
+          * @param cache Currently cached visibility parameters
+          */
+-        lit_level apparent_light_at( const tripoint &p, const visibility_variables &cache ) const;
++        lit_level apparent_light_at( const tripoint &p, const visibility_variables &cache,
++                                     const bool &recalc = false ) const;
+         visibility_type get_visibility( lit_level ll,
+                                         const visibility_variables &cache ) const;
+ 
+
+From 37f66fda9e675b09bee5be1979cbc7f1b8d46d6a Mon Sep 17 00:00:00 2001
+From: Rewryte <129854247+Rewryte@users.noreply.github.com>
+Date: Wed, 20 Sep 2023 13:14:57 +0800
+Subject: [PATCH 6/6] use apparent_light_at to handle visibility cache
+
+---
+ src/cata_tiles.cpp    | 23 ++++++++++-------------
+ src/handle_action.cpp |  4 +---
+ src/map.cpp           | 10 ++++------
+ src/pixel_minimap.cpp |  8 +++-----
+ 4 files changed, 18 insertions(+), 27 deletions(-)
+
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index 520ebe54ce9dd..1ece21d6350bf 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1348,8 +1348,6 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+     const point max_visible( ( you.posx() % SEEX ) + ( MAPSIZE - 1 ) * SEEX,
+                              ( you.posy() % SEEY ) + ( MAPSIZE - 1 ) * SEEY );
+ 
+-    const level_cache &ch = here.access_cache( center.z );
+-
+     // Map memory should be at least the size of the view range
+     // so that new tiles can be memorized, and at least the size of the display
+     // since at farthest zoom displayed area may be bigger than view range.
+@@ -1431,10 +1429,10 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+             }
+         }
+     }
+-    const auto apply_visible = [&]( const tripoint & np, const level_cache & ch, map & here ) {
++    const auto apply_visible = [&]( const tripoint & np, map & here ) {
+         return np.y < min_visible.y || np.y > max_visible.y ||
+                np.x < min_visible.x || np.x > max_visible.x ||
+-               would_apply_vision_effects( here.get_visibility( ch.visibility_cache[np.x][np.y],
++               would_apply_vision_effects( here.get_visibility( here.apparent_light_at( np, cache ),
+                                            cache ) );
+     };
+     std::map<tripoint, int> npc_attack_rating_map;
+@@ -1481,7 +1479,7 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                     continue;
+                 }
+             } else {
+-                ll = ch.visibility_cache[x][y];
++                ll = here.apparent_light_at( pos, cache );
+             }
+ 
+             // Add scent value to the overlay_strings list for every visible tile when
+@@ -1659,7 +1657,7 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+             }
+             for( int i = 0; i < 4; i++ ) {
+                 const tripoint np = pos + neighborhood[i];
+-                invisible[1 + i] = apply_visible( np, ch, here );
++                invisible[1 + i] = apply_visible( np, here );
+             }
+ 
+             // Determine lowest z-level to draw for 3D vision. Some off-screen
+@@ -1860,7 +1858,7 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                 continue;
+             }
+             const tripoint p( mem_x, mem_y, center.z );
+-            lit_level lighting = ch.visibility_cache[p.x][p.y];
++            lit_level lighting = here.apparent_light_at( p, cache );
+             // `apply_vision_effects` does not memorize anything so we only need
+             // to call `would_apply_vision_effects` here.
+             if( would_apply_vision_effects( here.get_visibility( lighting, cache ) ) ) {
+@@ -1871,7 +1869,7 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+             invisible[0] = false;
+             for( int i = 0; i < 4; i++ ) {
+                 const tripoint np = p + neighborhood[i];
+-                invisible[1 + i] = apply_visible( np, ch, here );
++                invisible[1 + i] = apply_visible( np, here );
+             }
+             //calling draw to memorize (and only memorize) everything.
+             //bypass cache check in case we learn something new about the terrain's connections
+@@ -1963,11 +1961,10 @@ std::pair<lit_level, std::array<bool, 5>> cata_tiles::calc_ll_invis( const tripo
+     const point min_visible( you.posx() % SEEX, you.posy() % SEEY );
+     const point max_visible( ( you.posx() % SEEX ) + ( MAPSIZE - 1 ) * SEEX,
+                              ( you.posy() % SEEY ) + ( MAPSIZE - 1 ) * SEEY );
+-    const level_cache &ch = here.access_cache( draw_loc.z );
+-    const auto apply_visible = [&]( const tripoint & np, const level_cache & ch, map & here ) {
++    const auto apply_visible = [&]( const tripoint & np, map & here ) {
+         return np.y < min_visible.y || np.y > max_visible.y ||
+                np.x < min_visible.x || np.x > max_visible.x ||
+-               would_apply_vision_effects( here.get_visibility( ch.visibility_cache[np.x][np.y],
++               would_apply_vision_effects( here.get_visibility( here.apparent_light_at( np, cache ),
+                                            cache ) );
+     };
+ 
+@@ -1988,7 +1985,7 @@ std::pair<lit_level, std::array<bool, 5>> cata_tiles::calc_ll_invis( const tripo
+             invisible[0] = true;
+         }
+     } else {
+-        ll = here.access_cache( draw_loc.z ).visibility_cache[draw_loc.x][draw_loc.y];
++        ll = here.apparent_light_at( draw_loc, cache );
+     }
+ 
+     if( !invisible[0] ) {
+@@ -2006,7 +2003,7 @@ std::pair<lit_level, std::array<bool, 5>> cata_tiles::calc_ll_invis( const tripo
+     }
+     for( int i = 0; i < 4; i++ ) {
+         const tripoint np = pos + neighborhood[i];
+-        invisible[1 + i] = apply_visible( np, ch, here );
++        invisible[1 + i] = apply_visible( np, here );
+     }
+ 
+     std::pair<lit_level, std::array<bool, 5>> ret( ll, invisible );
+diff --git a/src/handle_action.cpp b/src/handle_action.cpp
+index 61f2d8610cdce..7e44fa632e8a2 100644
+--- a/src/handle_action.cpp
++++ b/src/handle_action.cpp
+@@ -262,8 +262,6 @@ input_context game::get_player_input( std::string &action )
+ 
+     m.update_visibility_cache( u.posz() );
+     const visibility_variables &cache = m.get_visibility_variables_cache();
+-    const level_cache &map_cache = m.get_cache_ref( u.posz() );
+-    const auto &visibility_cache = map_cache.visibility_cache;
+ 
+     user_turn current_turn;
+ 
+@@ -343,7 +341,7 @@ input_context game::get_player_input( std::string &action )
+ 
+                     const tripoint mapp( map, u.posz() );
+ 
+-                    const lit_level lighting = visibility_cache[mapp.x][mapp.y];
++                    const lit_level lighting = m.apparent_light_at( mapp, cache );
+ 
+                     if( m.is_outside( mapp ) && m.get_visibility( lighting, cache ) == visibility_type::CLEAR &&
+                         !creatures.creature_at( mapp, true ) ) {
+diff --git a/src/map.cpp b/src/map.cpp
+index bbba66cb7c998..f59794463ff14 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1926,7 +1926,7 @@ uint8_t map::get_known_connections( const tripoint &p,
+         const bool neighbour_overridden = neighbour_override != override.end();
+         // if there's some non-memory terrain to show at the neighboring tile
+         const bool may_connect = neighbour_overridden ||
+-                                 get_visibility( ch.visibility_cache[neighbour.x][neighbour.y],
++                                 get_visibility( apparent_light_at( neighbour, get_visibility_variables_cache() ),
+                                          get_visibility_variables_cache() ) == visibility_type::CLEAR ||
+                                  // or if an actual center tile is transparent or next to a memorized tile
+                                  ( !overridden && ( is_transparent || is_memorized( neighbour ) ) );
+@@ -2010,7 +2010,7 @@ uint8_t map::get_known_connections_f( const tripoint &p,
+         const bool neighbour_overridden = neighbour_override != override.end();
+         // if there's some non-memory terrain to show at the neighboring tile
+         const bool may_connect = neighbour_overridden ||
+-                                 get_visibility( ch.visibility_cache[pt.x][pt.y],
++                                 get_visibility( apparent_light_at( pt, get_visibility_variables_cache() ),
+                                          get_visibility_variables_cache() ) ==
+                                  visibility_type::CLEAR ||
+                                  // or if an actual center tile is transparent or
+@@ -6659,8 +6659,6 @@ void map::draw( const catacurses::window &w, const tripoint &center )
+     update_visibility_cache( center.z );
+     const visibility_variables &cache = get_visibility_variables_cache();
+ 
+-    const auto &visibility_cache = get_cache_ref( center.z ).visibility_cache;
+-
+     int wnd_h = getmaxy( w );
+     int wnd_w = getmaxx( w );
+     const tripoint offs = center - tripoint( wnd_w / 2, wnd_h / 2, 0 );
+@@ -6724,7 +6722,7 @@ void map::draw( const catacurses::window &w, const tripoint &center )
+                 continue;
+             }
+ 
+-            const lit_level lighting = visibility_cache[p.x][p.y];
++            const lit_level lighting = apparent_light_at( p, cache );
+             const visibility_type vis = get_visibility( lighting, cache );
+ 
+             if( draw_vision_effect( vis ) ) {
+@@ -6759,7 +6757,7 @@ void map::draw( const catacurses::window &w, const tripoint &center )
+                 continue;
+             }
+ 
+-            const lit_level lighting = visibility_cache[p.x][p.y];
++            const lit_level lighting = apparent_light_at( p, cache );
+             const visibility_type vis = get_visibility( lighting, cache );
+ 
+             if( vis != visibility_type::CLEAR ) {
+diff --git a/src/pixel_minimap.cpp b/src/pixel_minimap.cpp
+index c983bdc93dfd8..f1cb52e3ff28c 100644
+--- a/src/pixel_minimap.cpp
++++ b/src/pixel_minimap.cpp
+@@ -304,7 +304,6 @@ void pixel_minimap::flush_cache_updates()
+ void pixel_minimap::update_cache_at( const tripoint &sm_pos )
+ {
+     const map &here = get_map();
+-    const level_cache &access_cache = here.access_cache( sm_pos.z );
+     const bool nv_goggle = get_player_character().get_vision_modes()[NV_GOGGLES];
+ 
+     // TODO: fix point types
+@@ -316,7 +315,7 @@ void pixel_minimap::update_cache_at( const tripoint &sm_pos )
+     for( int y = 0; y < SEEY; ++y ) {
+         for( int x = 0; x < SEEX; ++x ) {
+             const tripoint p = ms_pos + tripoint{ x, y, 0 };
+-            const lit_level lighting = access_cache.visibility_cache[p.x][p.y];
++            const lit_level lighting = here.apparent_light_at( p, here.get_visibility_variables_cache() );
+ 
+             SDL_Color color;
+ 
+@@ -506,19 +505,18 @@ void pixel_minimap::render_critters( const tripoint &center )
+         mixture = lerp_clamped( 0, 100, std::max( s, 0.0f ) );
+     }
+ 
+-    const level_cache &access_cache = get_map().access_cache( center.z );
+-
+     const point start( center.x - total_tiles_count.x / 2, center.y - total_tiles_count.y / 2 );
+     const point beacon_size = {
+         std::max<int>( projector->get_tile_size().x *settings.beacon_size / 2, 2 ),
+         std::max<int>( projector->get_tile_size().y *settings.beacon_size / 2, 2 )
+     };
+ 
++    const map &here = get_map();
+     creature_tracker &creatures = get_creature_tracker();
+     for( int y = 0; y < total_tiles_count.y; y++ ) {
+         for( int x = 0; x < total_tiles_count.x; x++ ) {
+             const tripoint p = start + tripoint( x, y, center.z );
+-            const lit_level lighting = access_cache.visibility_cache[p.x][p.y];
++            const lit_level lighting = here.apparent_light_at( p, here.get_visibility_variables_cache() );
+ 
+             if( lighting == lit_level::DARK || lighting == lit_level::BLANK ) {
+                 continue;
