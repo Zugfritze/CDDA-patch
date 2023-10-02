@@ -23,3 +23,5 @@ foreach ($patchFile in $patchFiles) {
         Write-Host "应用 Patch 文件 $($patchFile.Name) 时出现错误!"
     }
 }
+
+Copy-Item $scriptPath\zh_CN.po .\lang\po\zh_CN.po
