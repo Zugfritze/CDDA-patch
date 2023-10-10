@@ -1,0 +1,119 @@
+From b60c6b3e565a86df9f691283c113eae25c10fb9e Mon Sep 17 00:00:00 2001
+From: LISPCoC <fourier0520@gmail.com>
+Date: Tue, 10 Oct 2023 11:27:24 +0900
+Subject: [PATCH] display origin
+
+---
+ src/newcharacter.cpp  | 15 +++++++++++++++
+ src/overmapbuffer.cpp |  8 ++++++++
+ src/profession.h      |  3 ++-
+ src/scenario.h        |  2 +-
+ 4 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/src/newcharacter.cpp b/src/newcharacter.cpp
+index 9cc5f0379c9e6..6fc70ed892b0b 100644
+--- a/src/newcharacter.cpp
++++ b/src/newcharacter.cpp
+@@ -41,6 +41,7 @@
+ #include "make_static.h"
+ #include "mapsharing.h"
+ #include "martialarts.h"
++#include "mod_manager.h"
+ #include "monster.h"
+ #include "mutation.h"
+ #include "name.h"
+@@ -1940,6 +1941,13 @@ static std::string assemble_profession_details( const avatar &u, const input_con
+ {
+     std::string assembled;
+ 
++    // Display Origin
++    const std::string mod_src = enumerate_as_string( sorted_profs[cur_id]->src, [](
++    const std::pair<profession_id, mod_id> &source ) {
++        return string_format( "'%s'", source.second->name() );
++    }, enumeration_conjunction::arrow );
++    assembled += string_format( _( "Origin: %s" ), mod_src ) + "\n";
++
+     assembled += string_format( g_switch_msg( u ), ctxt.get_desc( "CHANGE_GENDER" ),
+                                 sorted_profs[cur_id]->gender_appropriate_name( !u.male ) ) + "\n";
+ 
+@@ -3042,6 +3050,13 @@ static std::string assemble_scenario_details( const avatar &u, const input_conte
+         const scenario *current_scenario )
+ {
+     std::string assembled;
++    // Display Origin
++    const std::string mod_src = enumerate_as_string( current_scenario->src,
++    []( const std::pair<string_id<scenario>, mod_id> &source ) {
++        return string_format( "'%s'", source.second->name() );
++    }, enumeration_conjunction::arrow );
++    assembled += string_format( _( "Origin: %s" ), mod_src ) + "\n";
++
+     assembled += string_format( g_switch_msg( u ), ctxt.get_desc( "CHANGE_GENDER" ),
+                                 current_scenario->gender_appropriate_name( !u.male ) ) + "\n";
+     assembled += string_format(
+diff --git a/src/overmapbuffer.cpp b/src/overmapbuffer.cpp
+index 3ea6a3e52a2b1..b60298fcd4621 100644
+--- a/src/overmapbuffer.cpp
++++ b/src/overmapbuffer.cpp
+@@ -28,6 +28,7 @@
+ #include "line.h"
+ #include "map.h"
+ #include "memory_fast.h"
++#include "mod_manager.h"
+ #include "mongroup.h"
+ #include "monster.h"
+ #include "npc.h"
+@@ -1587,6 +1588,13 @@ std::string overmapbuffer::get_description_at( const tripoint_abs_sm &where )
+         }
+     }
+ 
++    // Display Origin
++    const std::string mod_src = enumerate_as_string( oter->get_type_id().obj().src,
++    []( const std::pair<oter_type_str_id, mod_id> &source ) {
++        return string_format( "'%s'", source.second->name() );
++    }, enumeration_conjunction::arrow );
++    format_string += "\n" + string_format( _( "Origin: %s" ), mod_src );
++
+     return string_format( format_string, ter_name, dir_name, closest_city_name );
+ }
+ 
+diff --git a/src/profession.h b/src/profession.h
+index 3c99cbd0f8fc9..5e3b0d4b82eaa 100644
+--- a/src/profession.h
++++ b/src/profession.h
+@@ -47,7 +47,6 @@ class profession
+ 
+     private:
+         string_id<profession> id;
+-        std::vector<std::pair<string_id<profession>, mod_id>> src;
+         bool was_loaded = false;
+ 
+         translation _name_male;
+@@ -127,6 +126,8 @@ class profession
+         int age_lower = 21;
+         int age_upper = 55;
+ 
++        std::vector<std::pair<string_id<profession>, mod_id>> src;
++
+         std::optional<achievement_id> get_requirement() const;
+ 
+         std::map<spell_id, int> spells() const;
+diff --git a/src/scenario.h b/src/scenario.h
+index 962e8586260ba..57b52a164fe5e 100644
+--- a/src/scenario.h
++++ b/src/scenario.h
+@@ -24,7 +24,6 @@ class scenario
+         friend class generic_factory<scenario>;
+         friend struct mod_tracker;
+         string_id<scenario> id;
+-        std::vector<std::pair<string_id<scenario>, mod_id>> src;
+         bool was_loaded = false;
+         translation _name_male;
+         translation _name_female;
+@@ -150,6 +149,7 @@ class scenario
+         const std::vector<effect_on_condition_id> &eoc() const;
+         const std::vector<std::pair<mongroup_id, float>> &surround_groups() const;
+ 
++        std::vector<std::pair<string_id<scenario>, mod_id>> src;
+ };
+ 
+ struct scen_blacklist {
