@@ -1,0 +1,1212 @@
+From 59eef43ffc4c8e976603c856af96b0dd7d383213 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 19 Nov 2023 17:39:47 -0800
+Subject: [PATCH 1/9] Move the reachability flood fill to the creature tracker,
+ and use it to optimize monster movement and parrot_at_danger.
+
+---
+ src/creature_tracker.cpp | 126 ++++++++++++++++------
+ src/creature_tracker.h   | 139 +++++++++++++++++++-----
+ src/map.cpp              |   8 +-
+ src/map.h                |  13 ---
+ src/monattack.cpp        |  34 +++---
+ src/monmove.cpp          | 221 +++++++++++----------------------------
+ 6 files changed, 287 insertions(+), 254 deletions(-)
+
+diff --git a/src/creature_tracker.cpp b/src/creature_tracker.cpp
+index c422e35dbfef3..a8c4213292bdd 100644
+--- a/src/creature_tracker.cpp
++++ b/src/creature_tracker.cpp
+@@ -7,12 +7,14 @@
+ #include "avatar.h"
+ #include "cata_assert.h"
+ #include "debug.h"
++#include "flood_fill.h"
+ #include "map.h"
+ #include "mongroup.h"
+ #include "monster.h"
+ #include "mtype.h"
+ #include "npc.h"
+ #include "string_formatter.h"
++#include "submap.h"
+ #include "type_id.h"
+ 
+ static const efftype_id effect_ridden( "ridden" );
+@@ -93,23 +95,9 @@ bool creature_tracker::add( const shared_ptr_fast<monster> &critter_ptr )
+ 
+     monsters_list.emplace_back( critter_ptr );
+     monsters_by_location[critter.get_location()] = critter_ptr;
+-    add_to_faction_map( critter_ptr );
+     return true;
+ }
+ 
+-void creature_tracker::add_to_faction_map( const shared_ptr_fast<monster> &critter_ptr )
+-{
+-    cata_assert( critter_ptr );
+-    monster &critter = *critter_ptr;
+-
+-    // Only 1 faction per mon at the moment.
+-    if( critter.friendly == 0 ) {
+-        monster_faction_map_[critter.faction][critter_ptr->get_location().z()].insert( critter_ptr );
+-    } else {
+-        monster_faction_map_[monfaction_player][critter_ptr->get_location().z()].insert( critter_ptr );
+-    }
+-}
+-
+ size_t creature_tracker::size() const
+ {
+     return monsters_list.size();
+@@ -185,18 +173,8 @@ void creature_tracker::remove( const monster &critter )
+         return;
+     }
+ 
+-    for( auto &pair : monster_faction_map_ ) {
+-        const int zpos = critter.pos().z;
+-        const auto fac_iter = pair.second[zpos].find( *iter );
+-        if( fac_iter != pair.second[zpos].end() ) {
+-            // Need to do this manually because the shared pointer containing critter is kept valid
+-            // within removed_ and so the weak pointer in monster_faction_map_ is also valid.
+-            pair.second[zpos].erase( fac_iter );
+-            break;
+-        }
+-    }
+     remove_from_location_map( critter );
+-    removed_.push_back( *iter );
++    removed_.emplace( iter->get() );
+     monsters_list.erase( iter );
+ }
+ 
+@@ -204,17 +182,16 @@ void creature_tracker::clear()
+ {
+     monsters_list.clear();
+     monsters_by_location.clear();
+-    monster_faction_map_.clear();
+     removed_.clear();
++    creatures_by_zone_and_faction_.clear();
++    invalidate_reachability_cache();
+ }
+ 
+ void creature_tracker::rebuild_cache()
+ {
+     monsters_by_location.clear();
+-    monster_faction_map_.clear();
+     for( const shared_ptr_fast<monster> &mon_ptr : monsters_list ) {
+         monsters_by_location[mon_ptr->get_location()] = mon_ptr;
+-        add_to_faction_map( mon_ptr );
+     }
+ }
+ 
+@@ -224,6 +201,10 @@ void creature_tracker::swap_positions( monster &first, monster &second )
+         return;
+     }
+ 
++    if( first.get_reachable_zone() != second.get_reachable_zone() ) {
++        invalidate_reachability_cache();
++    }
++
+     // Either of them may be invalid!
+     const auto first_iter = monsters_by_location.find( first.get_location() );
+     const auto second_iter = monsters_by_location.find( second.get_location() );
+@@ -283,16 +264,15 @@ void creature_tracker::remove_dead()
+ {
+     // Can't use game::all_monsters() as it would not contain *dead* monsters.
+     for( auto iter = monsters_list.begin(); iter != monsters_list.end(); ) {
+-        const monster &critter = **iter;
+-        if( critter.is_dead() ) {
+-            remove_from_location_map( critter );
++        monster *const critter = iter->get();
++        if( critter->is_dead() ) {
++            remove_from_location_map( *critter );
++            removed_.insert( critter );
+             iter = monsters_list.erase( iter );
+         } else {
+             ++iter;
+         }
+     }
+-
+-    removed_.clear();
+ }
+ 
+ template<typename T>
+@@ -341,6 +321,86 @@ T *creature_tracker::creature_at( const tripoint_abs_ms &p, bool allow_hallucina
+     return nullptr;
+ }
+ 
++/** This is lazily evaluated on demand. Each creature in a zone is visited
++ * as it flood fills, then the zone number is incremented. At the end all creatures in
++ * the same zone will have the same zone number assigned, which can be used to have creatures in
++ * different zones ignore each other very cheaply.
++ */
++void creature_tracker::flood_fill_zone( const Creature &origin )
++{
++    if( dirty_ ) {
++        creatures_by_zone_and_faction_.clear();
++        removed_.clear();
++        zone_tick_ = zone_tick_ > 0 ? -1 : 1;
++        zone_number_ = 1;
++        dirty_ = false;
++    }
++
++    // This check insures we only flood fill when the target monster has an uninitialized zone,
++    // or if it has a zone from last turn.  In other words it only triggers on
++    // the first monster in a zone each turn. We can detect this because the sign
++    // of the zone numbers changes on every invalidation.
++    int old_zone = origin.get_reachable_zone();
++    // Compare with zone_tick == old_zone && old_zone != 0
++    if( old_zone * zone_tick_ > 0 ) {
++        return;
++    }
++
++    map &map = get_map();
++    ff::flood_fill_visit_10_connected( origin.pos_bub(),
++    [&map]( const tripoint_bub_ms & loc, int direction ) {
++        if( direction == 0 ) {
++            return map.inbounds( loc ) && ( map.is_transparent_wo_fields( loc.raw() ) ||
++                                            map.passable( loc ) );
++        }
++        if( direction == 1 ) {
++            const maptile &up = map.maptile_at( loc );
++            const ter_t &up_ter = up.get_ter_t();
++            if( up_ter.id.is_null() ) {
++                return false;
++            }
++            if( ( ( up_ter.movecost != 0 && up.get_furn_t().movecost >= 0 ) ||
++                  map.is_transparent_wo_fields( loc.raw() ) ) &&
++                ( up_ter.has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
++                  up_ter.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ) ) {
++                return true;
++            }
++        }
++        if( direction == -1 ) {
++            const maptile &up = map.maptile_at( loc + tripoint_above );
++            const ter_t &up_ter = up.get_ter_t();
++            if( up_ter.id.is_null() ) {
++                return false;
++            }
++            const maptile &down = map.maptile_at( loc );
++            const ter_t &down_ter = up.get_ter_t();
++            if( down_ter.id.is_null() ) {
++                return false;
++            }
++            if( ( ( down_ter.movecost != 0 && down.get_furn_t().movecost >= 0 ) ||
++                  map.is_transparent_wo_fields( loc.raw() ) ) &&
++                ( up_ter.has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
++                  up_ter.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ) ) {
++                return true;
++            }
++        }
++        return false;
++    },
++    [this]( const tripoint_bub_ms & loc ) {
++        Creature *creature = creature_at<Creature>( loc );
++        if( creature ) {
++            const int n = zone_number_ * zone_tick_;
++            creatures_by_zone_and_faction_[n][creature->get_monster_faction()].push_back( creature );
++            creature->set_reachable_zone( n );
++        }
++    } );
++    if( zone_number_ == std::numeric_limits<int>::max() ) {
++        zone_number_ = 1;
++    } else {
++        zone_number_++;
++    }
++}
++
+ template<typename T>
+ const T *creature_tracker::creature_at( const tripoint &p, bool allow_hallucination ) const
+ {
+diff --git a/src/creature_tracker.h b/src/creature_tracker.h
+index 436f301ad4e12..a0aaa6686c5f3 100644
+--- a/src/creature_tracker.h
++++ b/src/creature_tracker.h
+@@ -11,11 +11,11 @@
+ #include <vector>
+ 
+ #include "coordinates.h"
++#include "creature.h"
+ #include "memory_fast.h"
+ #include "point.h"
+ #include "type_id.h"
+ 
+-class Creature;
+ class game;
+ class JsonArray;
+ class JsonOut;
+@@ -24,29 +24,6 @@ class npc;
+ 
+ class creature_tracker
+ {
+-        friend game;
+-    private:
+-
+-        void add_to_faction_map( const shared_ptr_fast<monster> &critter );
+-
+-        class weak_ptr_comparator
+-        {
+-            public:
+-                bool operator()( const weak_ptr_fast<monster> &lhs,
+-                                 const weak_ptr_fast<monster> &rhs ) const {
+-                    return lhs.lock().get() < rhs.lock().get();
+-                }
+-        };
+-
+-        using MonstersByZ = std::map<int, std::set<weak_ptr_fast<monster>, weak_ptr_comparator>>;
+-        std::unordered_map<mfaction_id, MonstersByZ> monster_faction_map_; // NOLINT(cata-serialize)
+-
+-        /**
+-         * Creatures that get removed via @ref remove are stored here until the end of the turn.
+-         * This keeps the objects valid and they can still be accessed instead of causing UB.
+-         */
+-        std::vector<shared_ptr_fast<monster>> removed_; // NOLINT(cata-serialize)
+-
+     public:
+         creature_tracker();
+         ~creature_tracker();
+@@ -56,6 +33,44 @@ class creature_tracker
+          * Dead monsters are ignored and not returned.
+          */
+         shared_ptr_fast<monster> find( const tripoint_abs_ms &pos ) const;
++
++        /**
++         * Returns the reachable creature matching the given predicate.
++         *  - CreaturePredicateFn: bool(Creature*)
++         * If there is no creature, it returns a `nullptr`.
++         * Dead monsters are ignored and not returned.
++         */
++        template <typename PredicateFn>
++        Creature *find_reachable( const Creature &origin, PredicateFn predicate_fn );
++
++        /**
++         * Returns the reachable creature matching the given predicates.
++         *  - FactionPredicateFn: bool(const mfaction_id&)
++         *  - CreaturePredicateFn: bool(Creature*)
++         * If there is no creature, it returns a `nullptr`.
++         * Dead monsters are ignored and not returned.
++         */
++        template <typename FactionPredicateFn, typename CreaturePredicateFn>
++        Creature *find_reachable( const Creature &origin, FactionPredicateFn faction_fn,
++                                  CreaturePredicateFn creature_fn );
++        /**
++         * Visits all reachable creatures using the given functor.
++         *  - VisitFn: void(Creature*)
++         * Dead monsters are ignored and not visited.
++         */
++        template <typename VisitFn>
++        void for_each_reachable( const Creature &origin, VisitFn visit_fn );
++
++        /**
++         * Visits all reachable creatures using the given functor matching the given predicate.
++         *  - FactionPredicateFn: bool(const mfaction_id&)
++         *  - CreatureVisitFn: void(Creature*)
++         * Dead monsters are ignored and not visited.
++         */
++        template <typename FactionPredicateFn, typename CreatureVisitFn>
++        void for_each_reachable( const Creature &origin, FactionPredicateFn faction_fn,
++                                 CreatureVisitFn creature_fn );
++
+         /**
+          * Returns a temporary id of the given monster (which must exist in the tracker).
+          * The id is valid until monsters are added or removed from the tracker.
+@@ -118,20 +133,88 @@ class creature_tracker
+         void serialize( JsonOut &jsout ) const;
+         void deserialize( const JsonArray &ja );
+ 
+-        const decltype( monster_faction_map_ ) &factions() const {
+-            return monster_faction_map_;
++        void invalidate_reachability_cache() {
++            dirty_ = true;
+         }
+ 
+     private:
++        /** Remove the monsters entry in @ref monsters_by_location */
++        void remove_from_location_map( const monster &critter );
++
++        void flood_fill_zone( const Creature &origin );
++
+         std::list<shared_ptr_fast<npc>> active_npc; // NOLINT(cata-serialize)
+         std::vector<shared_ptr_fast<monster>> monsters_list;
+         void rebuild_cache();
+         // NOLINTNEXTLINE(cata-serialize)
+         std::unordered_map<tripoint_abs_ms, shared_ptr_fast<monster>> monsters_by_location;
+-        /** Remove the monsters entry in @ref monsters_by_location */
+-        void remove_from_location_map( const monster &critter );
++
++        // Tracks the dirtiness of the visitable zones cache. This must be flipped when
++        // persistent visibility from terrain or furniture changes (this excludes vehicles and fields)
++        // or when persistent traversability changes, which means walls and floors.
++        bool dirty_ = true;
++        int zone_tick_ = 1;
++        int zone_number_ = 0;
++        std::unordered_map < int, std::unordered_map<mfaction_id, std::vector<Creature *>>>
++        creatures_by_zone_and_faction_;
++        std::unordered_set<Creature *> removed_;
++
++        friend game;
+ };
+ 
+ creature_tracker &get_creature_tracker();
+ 
++// Implementation Details
++
++template <typename PredicateFn>
++Creature *creature_tracker::find_reachable( const Creature &origin, PredicateFn predicate_fn )
++{
++    return find_reachable( origin, []( const mfaction_id & ) {
++        return true;
++    }, std::move( predicate_fn ) );
++}
++
++template <typename FactionPredicateFn, typename CreaturePredicateFn>
++Creature *creature_tracker::find_reachable( const Creature &origin, FactionPredicateFn faction_fn,
++        CreaturePredicateFn creature_fn )
++{
++    flood_fill_zone( origin );
++
++    const auto map_iter = creatures_by_zone_and_faction_.find( origin.get_reachable_zone() );
++    if( map_iter != creatures_by_zone_and_faction_.end() ) {
++        for( const auto& [faction, creatures] : map_iter->second ) {
++            if( !faction_fn( faction ) ) {
++                continue;
++            }
++            for( Creature *other : creatures ) {
++                if( removed_.count( other ) == 0 ) {
++                    if( creature_fn( other ) ) {
++                        return other;
++                    }
++                }
++            }
++        }
++    }
++    return nullptr;
++}
++
++template <typename VisitFn>
++void creature_tracker::for_each_reachable( const Creature &origin, VisitFn visit_fn )
++{
++    find_reachable( origin, [visit_fn]( Creature * other ) {
++        visit_fn( other );
++        return false;
++    } );
++}
++
++template <typename FactionPredicateFn, typename CreatureVisitFn>
++void creature_tracker::for_each_reachable( const Creature &origin, FactionPredicateFn faction_fn,
++        CreatureVisitFn creature_fn )
++{
++    find_reachable( origin, std::move( faction_fn ), [creature_fn]( Creature * other ) {
++        creature_fn( other );
++        return false;
++    } );
++}
++
+ #endif // CATA_SRC_CREATURE_TRACKER_H
+diff --git a/src/map.cpp b/src/map.cpp
+index c0e8465400c00..6d8260a7b6261 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -241,7 +241,7 @@ void map::set_transparency_cache_dirty( const tripoint &p, bool field )
+         if( !field ) {
+             get_cache( smp.z ).r_hor_cache->invalidate( p.xy() );
+             get_cache( smp.z ).r_up_cache->invalidate( p.xy() );
+-            set_visitable_zones_cache_dirty();
++            get_creature_tracker().invalidate_reachability_cache();
+         }
+     }
+ }
+@@ -1775,7 +1775,7 @@ bool map::furn_set( const tripoint &p, const furn_id &new_furniture, const bool
+             ter_furn_flag::TFLAG_NO_FLOOR ) ) {
+         set_floor_cache_dirty( p.z );
+         set_seen_cache_dirty( p );
+-        set_visitable_zones_cache_dirty();
++        get_creature_tracker().invalidate_reachability_cache();
+     }
+ 
+     if( old_f.has_flag( ter_furn_flag::TFLAG_SUN_ROOF_ABOVE ) != new_f.has_flag(
+@@ -1791,7 +1791,7 @@ bool map::furn_set( const tripoint &p, const furn_id &new_furniture, const bool
+     }
+ 
+     if( ( old_f.movecost < 0 ) != ( new_f.movecost < 0 ) ) {
+-        set_visitable_zones_cache_dirty();
++        get_creature_tracker().invalidate_reachability_cache();
+     }
+     // TODO: Limit to changes that affect move cost, traps and stairs
+     set_pathfinding_cache_dirty( p.z );
+@@ -2238,7 +2238,7 @@ bool map::ter_set( const tripoint &p, const ter_id &new_terrain, bool avoid_crea
+     }
+ 
+     if( ( old_t.movecost == 0 ) != ( new_t.movecost == 0 ) ) {
+-        set_visitable_zones_cache_dirty();
++        get_creature_tracker().invalidate_reachability_cache();
+     }
+     // TODO: Limit to changes that affect move cost, traps and stairs
+     set_pathfinding_cache_dirty( p.z );
+diff --git a/src/map.h b/src/map.h
+index 967c9c88ac44c..845e40ed8b6d6 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -350,12 +350,6 @@ class map
+         void set_outside_cache_dirty( int zlev );
+         void set_floor_cache_dirty( int zlev );
+         void set_pathfinding_cache_dirty( int zlev );
+-        void set_visitable_zones_cache_dirty( bool dirty = true ) {
+-            visitable_cache_dirty = dirty;
+-        };
+-        bool get_visitable_zones_cache_dirty() const {
+-            return visitable_cache_dirty;
+-        };
+         /*@}*/
+ 
+         void invalidate_map_cache( int zlev );
+@@ -2236,13 +2230,6 @@ class map
+         bool _main_requires_cleanup = false;
+         std::optional<bool> _main_cleanup_override = std::nullopt;
+ 
+-        // Tracks the dirtiness of the visitable zones cache, but that cache does not live here,
+-        // it is distributed among the active monsters. This must be flipped when
+-        // persistent visibility from terrain or furniture changes
+-        // (this excludes vehicles and fields) or when persistent traversability changes,
+-        // which means walls and floors.
+-        bool visitable_cache_dirty = false;
+-
+     public:
+         void queue_main_cleanup();
+         bool is_main_cleanup_queued() const;
+diff --git a/src/monattack.cpp b/src/monattack.cpp
+index e96da0d73c830..0d8f73f63d0ab 100644
+--- a/src/monattack.cpp
++++ b/src/monattack.cpp
+@@ -4593,26 +4593,26 @@ bool mattack::parrot( monster *z )
+ 
+ bool mattack::parrot_at_danger( monster *parrot )
+ {
+-    for( Creature &creature : g->all_creatures() ) {
+-        if( !creature.is_hallucination() ) {
+-            if( creature.is_avatar() || creature.is_npc() ) {
+-                Character *character = creature.as_character();
+-                if( one_in( 20 ) && character->attitude_to( *parrot ) == Creature::Attitude::HOSTILE &&
+-                    parrot->sees( *character ) ) {
+-                    parrot_common( parrot );
+-                    return true;
+-                }
++    Creature *other = get_creature_tracker().find_reachable( *parrot, [parrot]( Creature * creature ) {
++        if( !creature->is_hallucination() ) {
++            if( creature->is_avatar() || creature->is_npc() ) {
++                Character *character = creature->as_character();
++                return ( one_in( 20 ) && character->attitude_to( *parrot ) == Creature::Attitude::HOSTILE &&
++                         parrot->sees( *character ) );
+             } else {
+-                monster *monster = creature.as_monster();
+-                if( one_in( 20 ) && ( monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_HATE ||
+-                                      ( monster->anger > 0 &&
+-                                        monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_BY_MOOD ) ) &&
+-                    parrot->sees( *monster ) ) {
+-                    parrot_common( parrot );
+-                    return true;
+-                }
++                monster *monster = creature->as_monster();
++                return ( one_in( 20 ) && ( monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_HATE ||
++                                           ( monster->anger > 0 &&
++                                             monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_BY_MOOD ) ) &&
++                         parrot->sees( *monster ) );
+             }
+         }
++        return false;
++    } );
++
++    if( other ) {
++        parrot_common( parrot );
++        return true;
+     }
+ 
+     return false;
+diff --git a/src/monmove.cpp b/src/monmove.cpp
+index f7b04a2869cf4..de3efd315ccfa 100644
+--- a/src/monmove.cpp
++++ b/src/monmove.cpp
+@@ -23,7 +23,6 @@
+ #include "debug.h"
+ #include "field.h"
+ #include "field_type.h"
+-#include "flood_fill.h"
+ #include "game.h"
+ #include "game_constants.h"
+ #include "line.h"
+@@ -485,96 +484,14 @@ bool monster::mating_angry() const
+     return mating_angry;
+ }
+ 
+-/** This is lazily evaluated in monster::plan(). Each monster in a zone is visited
+- * as it flood fills, then the zone number is incremented. At the end all monsters in
+- * the same zone will have the same zone number assigned, which can be used to have monsters in
+- * different zones ignore each other very cheaply.
+- */
+-static void flood_fill_zone( Creature &origin )
+-{
+-    static int zone_number = 1;
+-    static int zone_tick = 1;
+-    map &here = get_map();
+-    if( here.get_visitable_zones_cache_dirty() ) {
+-        zone_tick = zone_tick > 0 ? -1 : 1;
+-        here.set_visitable_zones_cache_dirty( false );
+-        zone_number = 1;
+-    }
+-    // This check insures we only flood fill when the target monster has an uninitialized zone,
+-    // or if it has a zone from last turn.  In other words it only triggers on
+-    // the first monster in a zone each turn. We can detect this because the sign
+-    // of the zone numbers changes on every invalidation.
+-    int old_zone = origin.get_reachable_zone();
+-    // Compare with zone_tick == old_zone && old_zone != 0
+-    if( ( zone_tick > 0 && old_zone > 0 ) ||
+-        ( zone_tick < 0 && old_zone < 0 ) ) {
+-        return;
+-    }
+-    creature_tracker &tracker = get_creature_tracker();
+-
+-    ff::flood_fill_visit_10_connected( origin.pos_bub(),
+-    [&here]( const tripoint_bub_ms & loc, int direction ) {
+-        if( direction == 0 ) {
+-            return here.inbounds( loc ) && ( here.is_transparent_wo_fields( loc.raw() ) ||
+-                                             here.passable( loc ) );
+-        }
+-        if( direction == 1 ) {
+-            const maptile &up = here.maptile_at( loc );
+-            const ter_t &up_ter = up.get_ter_t();
+-            if( up_ter.id.is_null() ) {
+-                return false;
+-            }
+-            if( ( ( up_ter.movecost != 0 && up.get_furn_t().movecost >= 0 ) ||
+-                  here.is_transparent_wo_fields( loc.raw() ) ) &&
+-                ( up_ter.has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
+-                  up_ter.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ) ) {
+-                return true;
+-            }
+-        }
+-        if( direction == -1 ) {
+-            const maptile &up = here.maptile_at( loc + tripoint_above );
+-            const ter_t &up_ter = up.get_ter_t();
+-            if( up_ter.id.is_null() ) {
+-                return false;
+-            }
+-            const maptile &down = here.maptile_at( loc );
+-            const ter_t &down_ter = up.get_ter_t();
+-            if( down_ter.id.is_null() ) {
+-                return false;
+-            }
+-            if( ( ( down_ter.movecost != 0 && down.get_furn_t().movecost >= 0 ) ||
+-                  here.is_transparent_wo_fields( loc.raw() ) ) &&
+-                ( up_ter.has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
+-                  up_ter.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ) ) {
+-                return true;
+-            }
+-        }
+-        return false;
+-    },
+-    [&tracker]( const tripoint_bub_ms & loc ) {
+-        Creature *creature = tracker.creature_at<Creature>( loc );
+-        if( creature ) {
+-            creature->set_reachable_zone( zone_number * zone_tick );
+-        }
+-    } );
+-    if( zone_number == std::numeric_limits<int>::max() ) {
+-        zone_number = 1;
+-    } else {
+-        zone_number++;
+-    }
+-}
+-
+ void monster::plan()
+ {
+-    const auto &factions = g->critter_tracker->factions();
+-
+     monster_plan mon_plan( *this );
+ 
+     map &here = get_map();
+     std::bitset<OVERMAP_LAYERS> seen_levels = here.get_inter_level_visibility( pos().z );
+     monster_attitude mood = attitude();
+     Character &player_character = get_player_character();
+-    flood_fill_zone( *this );
+     // If we can see the player, move toward them or flee.
+     if( friendly == 0 && seen_levels.test( player_character.pos().z + OVERMAP_DEPTH ) &&
+         sees( player_character ) ) {
+@@ -678,53 +595,46 @@ void monster::plan()
+     float rate_limiting_factor = 1.0 - logarithmic_range( 0, max_turns_for_rate_limiting,
+                                  turns_since_target );
+     int turns_to_skip = max_turns_to_skip * rate_limiting_factor;
++    creature_tracker &tracker = get_creature_tracker();
+     if( friendly == 0 && ( turns_to_skip == 0 || turns_since_target % turns_to_skip == 0 ) ) {
+-        for( const auto &fac_list : factions ) {
+-            mf_attitude faction_att = faction.obj().attitude( fac_list.first );
+-            if( faction_att == MFA_NEUTRAL || faction_att == MFA_FRIENDLY ) {
+-                continue;
+-            }
+-
+-            for( const auto &fac : fac_list.second ) {
+-                if( !seen_levels.test( fac.first + OVERMAP_DEPTH ) ) {
+-                    continue;
++        tracker.for_each_reachable( *this, [this]( const mfaction_id & other ) {
++            const mf_attitude faction_att = faction->attitude( other );
++            return !( faction_att == MFA_NEUTRAL || faction_att == MFA_FRIENDLY );
++        },
++        [this, &seen_levels, &mon_plan, &valid_targets]( Creature * other ) {
++            if( !seen_levels.test( other->posz() + OVERMAP_DEPTH ) ) {
++                return;
++            }
++            monster *mon_ptr = dynamic_cast<monster *>( other );
++            if( mon_ptr == nullptr ) {
++                return;
++            }
++            monster &mon = *mon_ptr;
++            float rating = rate_target( mon, mon_plan.dist, mon_plan.smart_planning );
++            if( rating == mon_plan.dist ) {
++                ++valid_targets;
++                if( one_in( valid_targets ) ) {
++                    mon_plan.target = &mon;
+                 }
+-                for( const weak_ptr_fast<monster> &weak : fac.second ) {
+-                    const shared_ptr_fast<monster> shared = weak.lock();
+-                    if( !shared ) {
+-                        continue;
+-                    }
+-                    monster &mon = *shared;
+-                    if( get_reachable_zone() != mon.get_reachable_zone() ) {
+-                        continue;
+-                    }
+-                    float rating = rate_target( mon, mon_plan.dist, mon_plan.smart_planning );
+-                    if( rating == mon_plan.dist ) {
+-                        ++valid_targets;
+-                        if( one_in( valid_targets ) ) {
+-                            mon_plan.target = &mon;
+-                        }
+-                    }
+-                    if( rating < mon_plan.dist ) {
+-                        mon_plan.target = &mon;
+-                        mon_plan.dist = rating;
+-                        valid_targets = 1;
+-                    }
+-                    if( rating <= 5 ) {
+-                        if( anger <= 30 ) {
+-                            anger += mon_plan.angers_hostile_near;
+-                        }
+-                        morale -= mon_plan.fears_hostile_near;
+-                    }
+-                    if( !mon_plan.fleeing && anger <= 20 && valid_targets != 0 ) {
+-                        anger += mon_plan.angers_hostile_seen;
+-                    }
+-                    if( !mon_plan.fleeing && valid_targets != 0 ) {
+-                        morale -= mon_plan.fears_hostile_seen;
+-                    }
++            }
++            if( rating < mon_plan.dist ) {
++                mon_plan.target = &mon;
++                mon_plan.dist = rating;
++                valid_targets = 1;
++            }
++            if( rating <= 5 ) {
++                if( anger <= 30 ) {
++                    anger += mon_plan.angers_hostile_near;
+                 }
++                morale -= mon_plan.fears_hostile_near;
+             }
+-        }
++            if( !mon_plan.fleeing && anger <= 20 && valid_targets != 0 ) {
++                anger += mon_plan.angers_hostile_seen;
++            }
++            if( !mon_plan.fleeing && valid_targets != 0 ) {
++                morale -= mon_plan.fears_hostile_seen;
++            }
++        } );
+     }
+     if( mon_plan.target == nullptr ) {
+         // Just avoiding overflow.
+@@ -736,43 +646,36 @@ void monster::plan()
+     // Friendly monsters here
+     // Avoid for hordes of same-faction stuff or it could get expensive
+     const mfaction_id actual_faction = friendly == 0 ? faction : STATIC( mfaction_str_id( "player" ) );
+-    const auto &myfaction_iter = factions.find( actual_faction );
+-    if( myfaction_iter == factions.end() ) {
+-        DebugLog( D_ERROR, D_GAME ) << disp_name() << " tried to find faction "
+-                                    << actual_faction.id().str()
+-                                    << " which wasn't loaded in game::monmove";
+-        mon_plan.swarms = false;
+-        mon_plan.group_morale = false;
+-    }
+     mon_plan.swarms = mon_plan.swarms && mon_plan.target == nullptr; // Only swarm if we have no target
+     if( mon_plan.group_morale || mon_plan.swarms ) {
+-        for( const auto &fac : myfaction_iter->second ) {
+-            if( !seen_levels.test( fac.first + OVERMAP_DEPTH ) ) {
+-                continue;
+-            }
+-            for( const weak_ptr_fast<monster> &weak : fac.second ) {
+-                const shared_ptr_fast<monster> shared = weak.lock();
+-                if( !shared ) {
+-                    continue;
+-                }
+-                monster &mon = *shared;
+-                float rating = rate_target( mon, mon_plan.dist, mon_plan.smart_planning );
+-                if( mon_plan.group_morale && rating <= 10 ) {
+-                    morale += 10 - rating;
+-                }
+-                if( mon_plan.swarms ) {
+-                    if( rating < 5 ) { // Too crowded here
+-                        wander_pos = get_location() + point( rng( 1, 3 ), rng( 1, 3 ) );
+-                        wandf = 2;
+-                        mon_plan.target = nullptr;
+-                        // Swarm to the furthest ally you can see
+-                    } else if( rating < FLT_MAX && rating > mon_plan.dist && wandf <= 0 ) {
+-                        mon_plan.target = &mon;
+-                        mon_plan.dist = rating;
+-                    }
++        tracker.for_each_reachable( *this, [actual_faction]( const mfaction_id & other ) {
++            return actual_faction == other;
++        },
++        [this, &seen_levels, &mon_plan]( Creature * other ) {
++            if( !seen_levels.test( other->posz() + OVERMAP_DEPTH ) ) {
++                return;
++            }
++            monster *mon_ptr = dynamic_cast<monster *>( other );
++            if( mon_ptr == nullptr ) {
++                return;
++            }
++            monster &mon = *mon_ptr;
++            float rating = rate_target( mon, mon_plan.dist, mon_plan.smart_planning );
++            if( mon_plan.group_morale && rating <= 10 ) {
++                morale += 10 - rating;
++            }
++            if( mon_plan.swarms ) {
++                if( rating < 5 ) { // Too crowded here
++                    wander_pos = get_location() + point( rng( 1, 3 ), rng( 1, 3 ) );
++                    wandf = 2;
++                    mon_plan.target = nullptr;
++                    // Swarm to the furthest ally you can see
++                } else if( rating < FLT_MAX && rating > mon_plan.dist && wandf <= 0 ) {
++                    mon_plan.target = &mon;
++                    mon_plan.dist = rating;
+                 }
+             }
+-        }
++        } );
+     }
+ 
+     // Operating monster keep you safe while they operate, how nice....
+
+From 2a330f2859b2875763f71391d2a7a370f80c640c Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 19 Nov 2023 17:44:00 -0800
+Subject: [PATCH 2/9] Clean up parrot_at_danger.
+
+---
+ src/monattack.cpp | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/monattack.cpp b/src/monattack.cpp
+index 0d8f73f63d0ab..5dd81699a0747 100644
+--- a/src/monattack.cpp
++++ b/src/monattack.cpp
+@@ -4594,16 +4594,16 @@ bool mattack::parrot( monster *z )
+ bool mattack::parrot_at_danger( monster *parrot )
+ {
+     Creature *other = get_creature_tracker().find_reachable( *parrot, [parrot]( Creature * creature ) {
+-        if( !creature->is_hallucination() ) {
++        if( !creature->is_hallucination() && one_in( 20 ) ) {
+             if( creature->is_avatar() || creature->is_npc() ) {
+                 Character *character = creature->as_character();
+-                return ( one_in( 20 ) && character->attitude_to( *parrot ) == Creature::Attitude::HOSTILE &&
++                return ( character->attitude_to( *parrot ) == Creature::Attitude::HOSTILE &&
+                          parrot->sees( *character ) );
+             } else {
+                 monster *monster = creature->as_monster();
+-                return ( one_in( 20 ) && ( monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_HATE ||
+-                                           ( monster->anger > 0 &&
+-                                             monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_BY_MOOD ) ) &&
++                return ( ( monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_HATE ||
++                           ( monster->anger > 0 &&
++                             monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_BY_MOOD ) ) &&
+                          parrot->sees( *monster ) );
+             }
+         }
+
+From c788582aa8126f649c4949715f29f4e78caef722 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 19 Nov 2023 18:10:15 -0800
+Subject: [PATCH 3/9] Add a test.
+
+---
+ tests/visitable_zone_test.cpp | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/tests/visitable_zone_test.cpp b/tests/visitable_zone_test.cpp
+index 4b0269ba6afef..8e3089ed9a32c 100644
+--- a/tests/visitable_zone_test.cpp
++++ b/tests/visitable_zone_test.cpp
+@@ -1,4 +1,5 @@
+ #include "cata_catch.h"
++#include "creature_tracker.h"
+ #include "map.h"
+ #include "map_helpers.h"
+ #include "map_iterator.h"
+@@ -152,11 +153,14 @@ TEST_CASE( "visitable_zone_surface_test" )
+         monster &mon = spawn_test_monster( mon_type, rooftop_area[choice] );
+         monsters.push_back( &mon );
+     }
+-    std::set<int> zones;
++    std::unordered_map<int, int> count_by_zone;
+     for( monster *mon : monsters ) {
+         mon->plan();
+-        zones.insert( mon->get_reachable_zone() );
++        const int zone = mon->get_reachable_zone();
++        ++count_by_zone[zone];
+     }
++    CHECK( count_by_zone.size() == 3 );
++
+     for( monster *mon : monsters ) {
+         tripoint mpos = mon->pos();
+         std::vector<structure>::iterator it =
+@@ -174,6 +178,20 @@ TEST_CASE( "visitable_zone_surface_test" )
+         CAPTURE( mon->pos() );
+         CAPTURE( mon->get_reachable_zone() );
+         CHECK( mon->get_reachable_zone() != 0 );
+-        CHECK( zones.size() == 3 );
++    }
++
++    creature_tracker &tracker = get_creature_tracker();
++    for( monster *mon : monsters ) {
++        const int zone = mon->get_reachable_zone();
++        int visited_count = 0;
++        tracker.for_each_reachable( *mon, [zone, &visited_count]( Creature * creature ) {
++            CHECK( zone == creature->get_reachable_zone() );
++            // Don't count the player.
++            if( creature->is_monster() ) {
++                ++visited_count;
++            }
++        } );
++
++        CHECK( visited_count == count_by_zone[zone] );
+     }
+ }
+
+From 2775adbcf7529d807a0ce125bf474d3a15b61e1d Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 19 Nov 2023 18:13:40 -0800
+Subject: [PATCH 4/9] Capture forwarded functions using move.
+
+---
+ src/creature_tracker.h | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/creature_tracker.h b/src/creature_tracker.h
+index a0aaa6686c5f3..7df9aa27b3010 100644
+--- a/src/creature_tracker.h
++++ b/src/creature_tracker.h
+@@ -201,7 +201,7 @@ Creature *creature_tracker::find_reachable( const Creature &origin, FactionPredi
+ template <typename VisitFn>
+ void creature_tracker::for_each_reachable( const Creature &origin, VisitFn visit_fn )
+ {
+-    find_reachable( origin, [visit_fn]( Creature * other ) {
++    find_reachable( origin, [visit_fn = std::move( visit_fn )]( Creature * other ) {
+         visit_fn( other );
+         return false;
+     } );
+@@ -211,7 +211,8 @@ template <typename FactionPredicateFn, typename CreatureVisitFn>
+ void creature_tracker::for_each_reachable( const Creature &origin, FactionPredicateFn faction_fn,
+         CreatureVisitFn creature_fn )
+ {
+-    find_reachable( origin, std::move( faction_fn ), [creature_fn]( Creature * other ) {
++    find_reachable( origin, std::move( faction_fn ), [creature_fn = std::move( creature_fn )](
++    Creature * other ) {
+         creature_fn( other );
+         return false;
+     } );
+
+From d3b65eea29ddf8704d5792e7f456b3e0e7ec2489 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 19 Nov 2023 18:49:29 -0800
+Subject: [PATCH 5/9] Try to help the basic build pick the correct overload.
+
+---
+ src/creature_tracker.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/creature_tracker.cpp b/src/creature_tracker.cpp
+index a8c4213292bdd..2f6be1f40c88f 100644
+--- a/src/creature_tracker.cpp
++++ b/src/creature_tracker.cpp
+@@ -387,7 +387,7 @@ void creature_tracker::flood_fill_zone( const Creature &origin )
+         return false;
+     },
+     [this]( const tripoint_bub_ms & loc ) {
+-        Creature *creature = creature_at<Creature>( loc );
++        Creature *creature = static_cast<creature_tracker *>( this )->creature_at<Creature>( loc );
+         if( creature ) {
+             const int n = zone_number_ * zone_tick_;
+             creatures_by_zone_and_faction_[n][creature->get_monster_faction()].push_back( creature );
+
+From 3bc9daa5b1d4db09bfe86c202017bcb007c82dde Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 19 Nov 2023 19:11:28 -0800
+Subject: [PATCH 6/9] Try being less helpful for the MSVC Windows build.
+
+---
+ src/creature_tracker.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/creature_tracker.cpp b/src/creature_tracker.cpp
+index 2f6be1f40c88f..80676b33d0e7f 100644
+--- a/src/creature_tracker.cpp
++++ b/src/creature_tracker.cpp
+@@ -387,7 +387,7 @@ void creature_tracker::flood_fill_zone( const Creature &origin )
+         return false;
+     },
+     [this]( const tripoint_bub_ms & loc ) {
+-        Creature *creature = static_cast<creature_tracker *>( this )->creature_at<Creature>( loc );
++        Creature *creature = this->creature_at<Creature>( loc );
+         if( creature ) {
+             const int n = zone_number_ * zone_tick_;
+             creatures_by_zone_and_faction_[n][creature->get_monster_faction()].push_back( creature );
+
+From 8482973804006cca04ba307b6d91b86b04f3473c Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 19 Nov 2023 22:14:18 -0800
+Subject: [PATCH 7/9] clang-tidy fixes.
+
+---
+ src/creature_tracker.cpp |  2 --
+ src/creature_tracker.h   | 16 ++++++++++------
+ src/monattack.cpp        | 12 ++++++------
+ 3 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/src/creature_tracker.cpp b/src/creature_tracker.cpp
+index 80676b33d0e7f..28b5972a34e6c 100644
+--- a/src/creature_tracker.cpp
++++ b/src/creature_tracker.cpp
+@@ -19,8 +19,6 @@
+ 
+ static const efftype_id effect_ridden( "ridden" );
+ 
+-static const mfaction_str_id monfaction_player( "player" );
+-
+ static const mon_flag_str_id mon_flag_VERMIN( "VERMIN" );
+ 
+ #define dbg(x) DebugLog((x),D_GAME) << __FILE__ << ":" << __LINE__ << ": "
+diff --git a/src/creature_tracker.h b/src/creature_tracker.h
+index 7df9aa27b3010..83f5071e4dece 100644
+--- a/src/creature_tracker.h
++++ b/src/creature_tracker.h
+@@ -133,6 +133,9 @@ class creature_tracker
+         void serialize( JsonOut &jsout ) const;
+         void deserialize( const JsonArray &ja );
+ 
++        // This must be called when persistent visibility from terrain or furniture changes
++        // (this excludes vehicles and fields) or when persistent traversability changes,
++        // which means walls and floors.
+         void invalidate_reachability_cache() {
+             dirty_ = true;
+         }
+@@ -143,21 +146,22 @@ class creature_tracker
+ 
+         void flood_fill_zone( const Creature &origin );
+ 
++        void rebuild_cache();
++
+         std::list<shared_ptr_fast<npc>> active_npc; // NOLINT(cata-serialize)
+         std::vector<shared_ptr_fast<monster>> monsters_list;
+-        void rebuild_cache();
+         // NOLINTNEXTLINE(cata-serialize)
+         std::unordered_map<tripoint_abs_ms, shared_ptr_fast<monster>> monsters_by_location;
+ 
+         // Tracks the dirtiness of the visitable zones cache. This must be flipped when
+         // persistent visibility from terrain or furniture changes (this excludes vehicles and fields)
+         // or when persistent traversability changes, which means walls and floors.
+-        bool dirty_ = true;
+-        int zone_tick_ = 1;
+-        int zone_number_ = 0;
++        bool dirty_ = true;  // NOLINT(cata-serialize)
++        int zone_tick_ = 1;  // NOLINT(cata-serialize)
++        int zone_number_ = 0;  // NOLINT(cata-serialize)
+         std::unordered_map < int, std::unordered_map<mfaction_id, std::vector<Creature *>>>
+-        creatures_by_zone_and_faction_;
+-        std::unordered_set<Creature *> removed_;
++        creatures_by_zone_and_faction_;  // NOLINT(cata-serialize)
++        std::unordered_set<Creature *> removed_;  // NOLINT(cata-serialize)
+ 
+         friend game;
+ };
+diff --git a/src/monattack.cpp b/src/monattack.cpp
+index 5dd81699a0747..312ca9504eaac 100644
+--- a/src/monattack.cpp
++++ b/src/monattack.cpp
+@@ -4597,14 +4597,14 @@ bool mattack::parrot_at_danger( monster *parrot )
+         if( !creature->is_hallucination() && one_in( 20 ) ) {
+             if( creature->is_avatar() || creature->is_npc() ) {
+                 Character *character = creature->as_character();
+-                return ( character->attitude_to( *parrot ) == Creature::Attitude::HOSTILE &&
+-                         parrot->sees( *character ) );
++                return character->attitude_to( *parrot ) == Creature::Attitude::HOSTILE &&
++                       parrot->sees( *character );
+             } else {
+                 monster *monster = creature->as_monster();
+-                return ( ( monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_HATE ||
+-                           ( monster->anger > 0 &&
+-                             monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_BY_MOOD ) ) &&
+-                         parrot->sees( *monster ) );
++                return ( monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_HATE ||
++                         ( monster->anger > 0 &&
++                           monster->faction->attitude( parrot->faction ) == mf_attitude::MFA_BY_MOOD ) ) &&
++                       parrot->sees( *monster );
+             }
+         }
+         return false;
+
+From b0b43d7b09c0507f9d54d3541eb36ccd4f293a7f Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 10:06:18 -0800
+Subject: [PATCH 8/9] Re-add the tracking for monsters removed during the turn.
+
+---
+ src/creature_tracker.cpp | 3 +++
+ src/creature_tracker.h   | 6 ++++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/creature_tracker.cpp b/src/creature_tracker.cpp
+index 28b5972a34e6c..32178e2219370 100644
+--- a/src/creature_tracker.cpp
++++ b/src/creature_tracker.cpp
+@@ -173,6 +173,7 @@ void creature_tracker::remove( const monster &critter )
+ 
+     remove_from_location_map( critter );
+     removed_.emplace( iter->get() );
++    removed_this_turn_.emplace( *iter );
+     monsters_list.erase( iter );
+ }
+ 
+@@ -181,6 +182,7 @@ void creature_tracker::clear()
+     monsters_list.clear();
+     monsters_by_location.clear();
+     removed_.clear();
++    removed_this_turn_.clear();
+     creatures_by_zone_and_faction_.clear();
+     invalidate_reachability_cache();
+ }
+@@ -271,6 +273,7 @@ void creature_tracker::remove_dead()
+             ++iter;
+         }
+     }
++    removed_this_turn_.clear();
+ }
+ 
+ template<typename T>
+diff --git a/src/creature_tracker.h b/src/creature_tracker.h
+index 83f5071e4dece..40b1c8fbc7475 100644
+--- a/src/creature_tracker.h
++++ b/src/creature_tracker.h
+@@ -153,6 +153,12 @@ class creature_tracker
+         // NOLINTNEXTLINE(cata-serialize)
+         std::unordered_map<tripoint_abs_ms, shared_ptr_fast<monster>> monsters_by_location;
+ 
++        /**
++         * Creatures that get removed via @ref remove are stored here until the end of the turn.
++         * This keeps the objects valid and they can still be accessed instead of causing UB.
++         */
++        std::unordered_set<shared_ptr_fast<monster>> removed_this_turn_;  // NOLINT(cata-serialize)
++
+         // Tracks the dirtiness of the visitable zones cache. This must be flipped when
+         // persistent visibility from terrain or furniture changes (this excludes vehicles and fields)
+         // or when persistent traversability changes, which means walls and floors.
+
+From 40ea07be2995f509d6ba1860cd6ab7ec3f6a4d89 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 27 Nov 2023 14:38:19 -0800
+Subject: [PATCH 9/9] Switch to forwarding references.
+
+---
+ src/creature_tracker.h | 30 +++++++++++++++---------------
+ 1 file changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/src/creature_tracker.h b/src/creature_tracker.h
+index 40b1c8fbc7475..eb12e48bb0365 100644
+--- a/src/creature_tracker.h
++++ b/src/creature_tracker.h
+@@ -41,7 +41,7 @@ class creature_tracker
+          * Dead monsters are ignored and not returned.
+          */
+         template <typename PredicateFn>
+-        Creature *find_reachable( const Creature &origin, PredicateFn predicate_fn );
++        Creature *find_reachable( const Creature &origin, PredicateFn &&predicate_fn );
+ 
+         /**
+          * Returns the reachable creature matching the given predicates.
+@@ -51,15 +51,15 @@ class creature_tracker
+          * Dead monsters are ignored and not returned.
+          */
+         template <typename FactionPredicateFn, typename CreaturePredicateFn>
+-        Creature *find_reachable( const Creature &origin, FactionPredicateFn faction_fn,
+-                                  CreaturePredicateFn creature_fn );
++        Creature *find_reachable( const Creature &origin, FactionPredicateFn &&faction_fn,
++                                  CreaturePredicateFn &&creature_fn );
+         /**
+          * Visits all reachable creatures using the given functor.
+          *  - VisitFn: void(Creature*)
+          * Dead monsters are ignored and not visited.
+          */
+         template <typename VisitFn>
+-        void for_each_reachable( const Creature &origin, VisitFn visit_fn );
++        void for_each_reachable( const Creature &origin, VisitFn &&visit_fn );
+ 
+         /**
+          * Visits all reachable creatures using the given functor matching the given predicate.
+@@ -68,8 +68,8 @@ class creature_tracker
+          * Dead monsters are ignored and not visited.
+          */
+         template <typename FactionPredicateFn, typename CreatureVisitFn>
+-        void for_each_reachable( const Creature &origin, FactionPredicateFn faction_fn,
+-                                 CreatureVisitFn creature_fn );
++        void for_each_reachable( const Creature &origin, FactionPredicateFn &&faction_fn,
++                                 CreatureVisitFn &&creature_fn );
+ 
+         /**
+          * Returns a temporary id of the given monster (which must exist in the tracker).
+@@ -177,16 +177,16 @@ creature_tracker &get_creature_tracker();
+ // Implementation Details
+ 
+ template <typename PredicateFn>
+-Creature *creature_tracker::find_reachable( const Creature &origin, PredicateFn predicate_fn )
++Creature *creature_tracker::find_reachable( const Creature &origin, PredicateFn &&predicate_fn )
+ {
+     return find_reachable( origin, []( const mfaction_id & ) {
+         return true;
+-    }, std::move( predicate_fn ) );
++    }, std::forward<PredicateFn>( predicate_fn ) );
+ }
+ 
+ template <typename FactionPredicateFn, typename CreaturePredicateFn>
+-Creature *creature_tracker::find_reachable( const Creature &origin, FactionPredicateFn faction_fn,
+-        CreaturePredicateFn creature_fn )
++Creature *creature_tracker::find_reachable( const Creature &origin, FactionPredicateFn &&faction_fn,
++        CreaturePredicateFn &&creature_fn )
+ {
+     flood_fill_zone( origin );
+ 
+@@ -209,19 +209,19 @@ Creature *creature_tracker::find_reachable( const Creature &origin, FactionPredi
+ }
+ 
+ template <typename VisitFn>
+-void creature_tracker::for_each_reachable( const Creature &origin, VisitFn visit_fn )
++void creature_tracker::for_each_reachable( const Creature &origin, VisitFn &&visit_fn )
+ {
+-    find_reachable( origin, [visit_fn = std::move( visit_fn )]( Creature * other ) {
++    find_reachable( origin, [&visit_fn]( Creature * other ) {
+         visit_fn( other );
+         return false;
+     } );
+ }
+ 
+ template <typename FactionPredicateFn, typename CreatureVisitFn>
+-void creature_tracker::for_each_reachable( const Creature &origin, FactionPredicateFn faction_fn,
+-        CreatureVisitFn creature_fn )
++void creature_tracker::for_each_reachable( const Creature &origin, FactionPredicateFn &&faction_fn,
++        CreatureVisitFn &&creature_fn )
+ {
+-    find_reachable( origin, std::move( faction_fn ), [creature_fn = std::move( creature_fn )](
++    find_reachable( origin, std::forward<FactionPredicateFn>( faction_fn ), [&creature_fn](
+     Creature * other ) {
+         creature_fn( other );
+         return false;
