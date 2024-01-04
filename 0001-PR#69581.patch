@@ -1,0 +1,1230 @@
+From 49d05a001d99789250581356ac9b312fe9239b5f Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 00:38:06 -0800
+Subject: [PATCH 01/11] Make add_msg_debug a macro.
+
+---
+ src/character.cpp     |  4 ++--
+ src/debug.cpp         |  2 +-
+ src/debug.h           |  2 +-
+ src/handle_action.cpp | 16 +++++++---------
+ src/messages.cpp      | 21 ++-------------------
+ src/messages.h        | 29 ++++++++++++-----------------
+ 6 files changed, 25 insertions(+), 49 deletions(-)
+
+diff --git a/src/character.cpp b/src/character.cpp
+index 56fd1f4b40f50..4131e5a0bd659 100644
+--- a/src/character.cpp
++++ b/src/character.cpp
+@@ -873,7 +873,7 @@ void Character::add_msg_if_player( const game_message_params &params, const std:
+ void Character::add_msg_debug_if_player( debugmode::debug_filter type,
+         const std::string &msg ) const
+ {
+-    Messages::add_msg_debug( type, msg );
++    add_msg_debug( type, msg );
+ }
+ 
+ void Character::add_msg_player_or_npc( const game_message_params &params,
+@@ -887,7 +887,7 @@ void Character::add_msg_debug_player_or_npc( debugmode::debug_filter type,
+         const std::string &player_msg,
+         const std::string &/*npc_msg*/ ) const
+ {
+-    Messages::add_msg_debug( type, player_msg );
++    add_msg_debug( type, player_msg );
+ }
+ 
+ void Character::add_msg_player_or_say( const std::string &player_msg,
+diff --git a/src/debug.cpp b/src/debug.cpp
+index d9e3995d5bacc..ac4399a0f724f 100644
+--- a/src/debug.cpp
++++ b/src/debug.cpp
+@@ -210,7 +210,7 @@ bool debug_mode = false;
+ 
+ namespace debugmode
+ {
+-std::list<debug_filter> enabled_filters;
++std::unordered_set<debug_filter> enabled_filters;
+ std::string filter_name( debug_filter value )
+ {
+     // see debug.h for commentary
+diff --git a/src/debug.h b/src/debug.h
+index 1d9719a4d8cfd..a9ca728e43b8c 100644
+--- a/src/debug.h
++++ b/src/debug.h
+@@ -280,7 +280,7 @@ enum debug_filter : int {
+     DF_LAST // This is always the last entry
+ };
+ 
+-extern std::list<debug_filter> enabled_filters;
++extern std::unordered_set<debug_filter> enabled_filters;
+ std::string filter_name( debug_filter value );
+ } // namespace debugmode
+ 
+diff --git a/src/handle_action.cpp b/src/handle_action.cpp
+index 4d303deb35580..fda7495b4adc3 100644
+--- a/src/handle_action.cpp
++++ b/src/handle_action.cpp
+@@ -1864,7 +1864,7 @@ static void handle_debug_mode()
+         first_time = false;
+         debugmode::enabled_filters.clear();
+         for( int i = 0; i < debugmode::DF_LAST; ++i ) {
+-            debugmode::enabled_filters.emplace_back( static_cast<debugmode::debug_filter>( i ) );
++            debugmode::enabled_filters.emplace( static_cast<debugmode::debug_filter>( i ) );
+         }
+     }
+ 
+@@ -1891,9 +1891,8 @@ static void handle_debug_mode()
+ 
+         entry.extratxt.left = 1;
+ 
+-        const bool active = std::find(
+-                                debugmode::enabled_filters.begin(), debugmode::enabled_filters.end(),
+-                                static_cast<debugmode::debug_filter>( i ) ) != debugmode::enabled_filters.end();
++        const bool active = debugmode::enabled_filters.count( static_cast<debugmode::debug_filter>
++                            ( i ) ) == 1;
+ 
+         if( toggle_value && active ) {
+             toggle_value = false;
+@@ -1926,7 +1925,7 @@ static void handle_debug_mode()
+                 debugmode_entry_setup( dbmenu.entries[i + 2], toggle_value );
+ 
+                 if( toggle_value ) {
+-                    debugmode::enabled_filters.emplace_back( static_cast<debugmode::debug_filter>( i ) );
++                    debugmode::enabled_filters.emplace( static_cast<debugmode::debug_filter>( i ) );
+                 }
+             }
+ 
+@@ -1935,9 +1934,8 @@ static void handle_debug_mode()
+         } else if( dbmenu.ret > 1 ) {
+             uilist_entry &entry = dbmenu.entries[dbmenu.ret];
+ 
+-            const auto filter_iter = std::find(
+-                                         debugmode::enabled_filters.begin(), debugmode::enabled_filters.end(),
+-                                         static_cast<debugmode::debug_filter>( dbmenu.ret - 2 ) );
++            const auto filter_iter = debugmode::enabled_filters.find( static_cast<debugmode::debug_filter>
++                                     ( dbmenu.ret - 2 ) );
+ 
+             const bool active = filter_iter != debugmode::enabled_filters.end();
+ 
+@@ -1946,7 +1944,7 @@ static void handle_debug_mode()
+             if( active ) {
+                 debugmode::enabled_filters.erase( filter_iter );
+             } else {
+-                debugmode::enabled_filters.push_back(
++                debugmode::enabled_filters.emplace(
+                     static_cast<debugmode::debug_filter>( dbmenu.ret - 2 ) );
+             }
+         }
+diff --git a/src/messages.cpp b/src/messages.cpp
+index fb72080ff10bf..82121b245889d 100644
+--- a/src/messages.cpp
++++ b/src/messages.cpp
+@@ -457,18 +457,6 @@ void Messages::add_msg( const game_message_params &params, std::string msg )
+     player_messages.add_msg_string( std::move( msg ), params );
+ }
+ 
+-void Messages::add_msg_debug( debugmode::debug_filter type, std::string msg )
+-{
+-    if( debug_mode &&
+-        std::find(
+-            debugmode::enabled_filters.begin(), debugmode::enabled_filters.end(),
+-            type ) == debugmode::enabled_filters.end() ) {
+-        return;
+-    }
+-
+-    player_messages.add_msg_string( std::move( msg ), m_debug );
+-}
+-
+ void Messages::clear_messages()
+ {
+     player_messages.messages.clear();
+@@ -1012,11 +1000,6 @@ void add_msg( const game_message_params &params, std::string msg )
+     Messages::add_msg( params, std::move( msg ) );
+ }
+ 
+-void add_msg_debug( debugmode::debug_filter type, std::string msg )
+-{
+-    Messages::add_msg_debug( type, std::move( msg ) );
+-}
+-
+ void add_msg_if_player_sees( const tripoint &target, std::string msg )
+ {
+     if( get_player_view().sees( target ) ) {
+@@ -1051,7 +1034,7 @@ void add_msg_debug_if_player_sees( const tripoint &target, debugmode::debug_filt
+                                    std::string msg )
+ {
+     if( get_player_view().sees( target ) ) {
+-        Messages::add_msg_debug( type, std::move( msg ) );
++        add_msg_debug( type, std::move( msg ) );
+     }
+ }
+ 
+@@ -1059,6 +1042,6 @@ void add_msg_debug_if_player_sees( const Creature &target, debugmode::debug_filt
+                                    std::string msg )
+ {
+     if( get_player_view().sees( target ) ) {
+-        Messages::add_msg_debug( type, std::move( msg ) );
++        add_msg_debug( type, std::move( msg ) );
+     }
+ }
+diff --git a/src/messages.h b/src/messages.h
+index 7d22987022341..0e0e32a8a5c4f 100644
+--- a/src/messages.h
++++ b/src/messages.h
+@@ -25,10 +25,14 @@ class window;
+ 
+ namespace Messages
+ {
++
+ std::vector<std::pair<std::string, std::string>> recent_messages( size_t count );
++inline bool has_debug_filter( debugmode::debug_filter type )
++{
++    return debug_mode && debugmode::enabled_filters.count( type ) == 1;
++}
+ void add_msg( std::string msg );
+ void add_msg( const game_message_params &params, std::string msg );
+-void add_msg_debug( debugmode::debug_filter type, std::string msg );
+ void clear_messages();
+ void deactivate();
+ size_t size();
+@@ -38,6 +42,7 @@ void display_messages( const catacurses::window &ipk_target, int left, int top,
+                        int bottom );
+ void serialize( JsonOut &json );
+ void deserialize( const JsonObject &json );
++
+ } // namespace Messages
+ 
+ void add_msg( std::string msg );
+@@ -75,22 +80,12 @@ inline void add_msg( const game_message_params &params, const char *const msg, A
+     return add_msg( params, string_format( msg, std::forward<Args>( args )... ) );
+ }
+ 
+-void add_msg_debug( debugmode::debug_filter type, std::string msg );
+-template<typename ...Args>
+-inline void add_msg_debug( debugmode::debug_filter type, const std::string &msg, Args &&... args )
+-{
+-    // expanding for string formatting can be expensive
+-    if( debug_mode ) {
+-        return add_msg_debug( type, string_format( msg, std::forward<Args>( args )... ) );
+-    }
+-}
+-template<typename ...Args>
+-inline void add_msg_debug( debugmode::debug_filter type, const char *const msg, Args &&... args )
+-{
+-    if( debug_mode ) {
+-        return add_msg_debug( type, string_format( msg, std::forward<Args>( args )... ) );
+-    }
+-}
++#define add_msg_debug(type, ...)                                        \
++    do {                                                                \
++        if( Messages::has_debug_filter( type ) ) {                      \
++            Messages::add_msg( m_debug, string_format( __VA_ARGS__ ) ); \
++        }                                                               \
++    } while( false )
+ 
+ void add_msg_if_player_sees( const tripoint &target, std::string msg );
+ void add_msg_if_player_sees( const Creature &target, std::string msg );
+
+From 0f932a7f7f335d2ccdbff31c4a29d3d21364622e Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 00:56:53 -0800
+Subject: [PATCH 02/11] Let tests change the behaviour of has_debug_filter.
+
+---
+ src/debug.h             |  2 +-
+ src/messages.cpp        |  5 +++++
+ src/messages.h          |  5 +----
+ tests/fake_messages.cpp | 13 ++++---------
+ 4 files changed, 11 insertions(+), 14 deletions(-)
+
+diff --git a/src/debug.h b/src/debug.h
+index a9ca728e43b8c..a6e4687af6483 100644
+--- a/src/debug.h
++++ b/src/debug.h
+@@ -3,7 +3,7 @@
+ #define CATA_SRC_DEBUG_H
+ 
+ #include "string_formatter.h"
+-#include <list>
++#include <unordered_set>
+ 
+ /**
+  *      debugmsg(msg, ...)
+diff --git a/src/messages.cpp b/src/messages.cpp
+index 82121b245889d..2e19a6fcecaa0 100644
+--- a/src/messages.cpp
++++ b/src/messages.cpp
+@@ -427,6 +427,11 @@ std::vector<std::pair<std::string, std::string>> Messages::recent_messages( cons
+     return player_messages.recent_messages( count );
+ }
+ 
++bool Messages::has_debug_filter( debugmode::debug_filter type )
++{
++    return debug_mode && debugmode::enabled_filters.count( type ) == 1;
++}
++
+ void Messages::serialize( JsonOut &json )
+ {
+     json.member( "player_messages" );
+diff --git a/src/messages.h b/src/messages.h
+index 0e0e32a8a5c4f..2103af549b434 100644
+--- a/src/messages.h
++++ b/src/messages.h
+@@ -27,10 +27,7 @@ namespace Messages
+ {
+ 
+ std::vector<std::pair<std::string, std::string>> recent_messages( size_t count );
+-inline bool has_debug_filter( debugmode::debug_filter type )
+-{
+-    return debug_mode && debugmode::enabled_filters.count( type ) == 1;
+-}
++bool has_debug_filter( debugmode::debug_filter type );
+ void add_msg( std::string msg );
+ void add_msg( const game_message_params &params, std::string msg );
+ void clear_messages();
+diff --git a/tests/fake_messages.cpp b/tests/fake_messages.cpp
+index bc0e94f5079cd..5812ecc166adc 100644
+--- a/tests/fake_messages.cpp
++++ b/tests/fake_messages.cpp
+@@ -28,6 +28,10 @@ std::vector<std::pair<std::string, std::string>> Messages::recent_messages( size
+ {
+     return messages;
+ }
++bool Messages::has_debug_filter( debugmode::debug_filter type )
++{
++    return true;
++}
+ void Messages::add_msg( std::string m )
+ {
+     messages.emplace_back( to_string_time_of_day( calendar::turn ), std::move( m ) );
+@@ -36,11 +40,6 @@ void Messages::add_msg( const game_message_params &, std::string m )
+ {
+     add_msg( std::move( m ) );
+ }
+-void Messages::add_msg_debug( debugmode::debug_filter, std::string m )
+-{
+-    // cata_test does not need filters
+-    add_msg( std::move( m ) );
+-}
+ void Messages::clear_messages()
+ {
+     messages.clear();
+@@ -67,10 +66,6 @@ void add_msg( const game_message_params &, std::string m )
+ {
+     Messages::add_msg( std::move( m ) );
+ }
+-void add_msg_debug( debugmode::debug_filter, std::string m )
+-{
+-    Messages::add_msg( std::move( m ) );
+-}
+ void add_msg_if_player_sees( const tripoint &, std::string m )
+ {
+     Messages::add_msg( std::move( m ) );
+
+From 9eacb561486a28927733c98cd375432e4d93b6ab Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 01:11:00 -0800
+Subject: [PATCH 03/11] Maybe fix clang-tidy. These checks are no longer
+ needed.
+
+---
+ .../test/translations-in-debug-messages.cpp    | 18 ------------------
+ 1 file changed, 18 deletions(-)
+
+diff --git a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+index 295a07b1a75f7..4a97e73d7c83c 100644
+--- a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
++++ b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+@@ -8,21 +8,6 @@
+ static void f( const time_duration &duration, Creature &c )
+ {
+     char *skill_level;
+-    add_msg_debug( debugmode::DF_ACT_BUTCHER, _( "Skill: %s" ), skill_level );
+-    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
+-
+-    add_msg_debug( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
+-
+-    add_msg_debug( debugmode::DF_ACT_BUTCHER, pgettext( "Skill", "foo" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
+-
+-    add_msg_debug( debugmode::DF_ACT_BUTCHER, n_gettext( "Skill", "Skills", 0 ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
+-
+-    add_msg_debug( debugmode::DF_ACT_BUTCHER, "%s", to_translation( "Skill" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:53: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
+-
+     add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill: %s" ), skill_level );
+     // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
+ 
+@@ -34,7 +19,4 @@ static void f( const time_duration &duration, Creature &c )
+ 
+     c.add_msg_debug_if_npc( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:56: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
+-
+-    add_msg_debug( debugmode::DF_ACT_BUTCHER, "Duration %s", to_string( duration ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:62: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost.  This call to to_string might involve a translation; consider using to_string_writable instead. [cata-translations-in-debug-messages]
+ }
+
+From 79c9fa973969bd5720319ec502c741111d6d83f1 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 01:36:21 -0800
+Subject: [PATCH 04/11] clang-tidy fix
+
+---
+ tests/fake_messages.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/fake_messages.cpp b/tests/fake_messages.cpp
+index 5812ecc166adc..2b874de88834b 100644
+--- a/tests/fake_messages.cpp
++++ b/tests/fake_messages.cpp
+@@ -28,7 +28,7 @@ std::vector<std::pair<std::string, std::string>> Messages::recent_messages( size
+ {
+     return messages;
+ }
+-bool Messages::has_debug_filter( debugmode::debug_filter type )
++bool Messages::has_debug_filter( debugmode::debug_filter )
+ {
+     return true;
+ }
+
+From 3d234ec093800fb7c1ea2dd0ebc91e91e9f96962 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 09:40:47 -0800
+Subject: [PATCH 05/11] Make add_msg_debug_if_player_sees a macro, and update
+ the clang-tidy tool to detect translations in these macros.
+
+---
+ src/messages.cpp                              | 16 -----
+ src/messages.h                                | 65 ++++++-------------
+ tests/fake_messages.cpp                       | 10 ---
+ .../TranslationsInDebugMessagesCheck.cpp      | 10 ++-
+ .../test/translations-in-debug-messages.cpp   | 26 ++++++--
+ 5 files changed, 45 insertions(+), 82 deletions(-)
+
+diff --git a/src/messages.cpp b/src/messages.cpp
+index 2e19a6fcecaa0..cdebe1eafe4f6 100644
+--- a/src/messages.cpp
++++ b/src/messages.cpp
+@@ -1034,19 +1034,3 @@ void add_msg_if_player_sees( const Creature &target, const game_message_params &
+         Messages::add_msg( params, std::move( msg ) );
+     }
+ }
+-
+-void add_msg_debug_if_player_sees( const tripoint &target, debugmode::debug_filter type,
+-                                   std::string msg )
+-{
+-    if( get_player_view().sees( target ) ) {
+-        add_msg_debug( type, std::move( msg ) );
+-    }
+-}
+-
+-void add_msg_debug_if_player_sees( const Creature &target, debugmode::debug_filter type,
+-                                   std::string msg )
+-{
+-    if( get_player_view().sees( target ) ) {
+-        add_msg_debug( type, std::move( msg ) );
+-    }
+-}
+diff --git a/src/messages.h b/src/messages.h
+index 2103af549b434..16a1bddc354b3 100644
+--- a/src/messages.h
++++ b/src/messages.h
+@@ -77,13 +77,6 @@ inline void add_msg( const game_message_params &params, const char *const msg, A
+     return add_msg( params, string_format( msg, std::forward<Args>( args )... ) );
+ }
+ 
+-#define add_msg_debug(type, ...)                                        \
+-    do {                                                                \
+-        if( Messages::has_debug_filter( type ) ) {                      \
+-            Messages::add_msg( m_debug, string_format( __VA_ARGS__ ) ); \
+-        }                                                               \
+-    } while( false )
+-
+ void add_msg_if_player_sees( const tripoint &target, std::string msg );
+ void add_msg_if_player_sees( const Creature &target, std::string msg );
+ template<typename ...Args>
+@@ -166,48 +159,28 @@ inline void add_msg_if_player_sees( const Creature &target, const game_message_p
+                                    std::forward<Args>( args )... ) );
+ }
+ 
+-void add_msg_debug_if_player_sees( const tripoint &target, debugmode::debug_filter type,
+-                                   std::string msg );
+-void add_msg_debug_if_player_sees( const Creature &target, debugmode::debug_filter type,
+-                                   std::string msg );
+-template<typename ...Args>
+-inline void add_msg_debug_if_player_sees( const tripoint &target, debugmode::debug_filter type,
+-        const std::string &msg, Args &&... args )
+-{
+-    // expanding for string formatting can be expensive
+-    if( debug_mode ) {
+-        return add_msg_debug_if_player_sees( target, type, string_format( msg,
+-                                             std::forward<Args>( args )... ) );
+-    }
+-}
+-template<typename ...Args>
+-inline void add_msg_debug_if_player_sees( const Creature &target, debugmode::debug_filter type,
+-        const std::string &msg, Args &&... args )
+-{
+-    if( debug_mode ) {
+-        return add_msg_debug_if_player_sees( target, type, string_format( msg,
+-                                             std::forward<Args>( args )... ) );
+-    }
+-}
+-template<typename ...Args>
+-inline void add_msg_debug_if_player_sees( const tripoint &target, debugmode::debug_filter type,
+-        const char *const msg, Args &&... args )
+-{
+-    if( debug_mode ) {
+-        return add_msg_debug_if_player_sees( target, type, string_format( msg,
+-                                             std::forward<Args>( args )... ) );
+-    }
+-}
+-template<typename ...Args>
+-inline void add_msg_debug_if_player_sees( const Creature &target, debugmode::debug_filter type,
+-        const char *const msg, Args &&... args )
++// This function acts as a marker to clang-tidy to enforce no translations
++// in developer facing debug messages.
++template <typename T>
++inline T &&clang_tidy_no_translations( T &&t )
+ {
+-    if( debug_mode ) {
+-        return add_msg_debug_if_player_sees( target, type, string_format( msg,
+-                                             std::forward<Args>( args )... ) );
+-    }
++    return std::forward<T>( t );
+ }
+ 
++#define add_msg_debug(type, ...)                                                                        \
++    do {                                                                                                \
++        if( Messages::has_debug_filter( type ) ) {                                                      \
++            Messages::add_msg( m_debug, clang_tidy_no_translations( string_format( __VA_ARGS__ ) ) );   \
++        }                                                                                               \
++    } while( false )
++
++#define add_msg_debug_if_player_sees(target, type, ...)                                                 \
++    do {                                                                                                \
++        if( Messages::has_debug_filter( type ) && get_player_view().sees( target ) ) {                  \
++            Messages::add_msg( m_debug, clang_tidy_no_translations( string_format( __VA_ARGS__ ) ) );   \
++        }                                                                                               \
++    } while( false )
++
+ void modify_msg_with_exclamations( std::string &msg, game_message_type type );
+ 
+ #endif // CATA_SRC_MESSAGES_H
+diff --git a/tests/fake_messages.cpp b/tests/fake_messages.cpp
+index 2b874de88834b..a7a2042195be7 100644
+--- a/tests/fake_messages.cpp
++++ b/tests/fake_messages.cpp
+@@ -82,13 +82,3 @@ void add_msg_if_player_sees( const Creature &, const game_message_params &, std:
+ {
+     Messages::add_msg( std::move( m ) );
+ }
+-void add_msg_debug_if_player_sees( const tripoint &, debugmode::debug_filter,
+-                                   std::string m )
+-{
+-    Messages::add_msg( std::move( m ) );
+-}
+-void add_msg_debug_if_player_sees( const Creature &, debugmode::debug_filter,
+-                                   std::string m )
+-{
+-    Messages::add_msg( std::move( m ) );
+-}
+diff --git a/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp b/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp
+index 2587c768a4c1d..c8b526a8adc8f 100644
+--- a/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp
++++ b/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp
+@@ -31,7 +31,7 @@ void TranslationsInDebugMessagesCheck::registerMatchers( MatchFinder *Finder )
+                     )
+                 )
+             ),
+-            hasAncestor( callExpr( callee( functionDecl( matchesName( "add_msg_debug.*" ) ) ) ) )
++            hasAncestor( callExpr( callee( functionDecl( matchesName( "clang_tidy_no_translations" ) ) ) ) )
+         ).bind( "translationCall" ),
+         this
+     );
+@@ -48,15 +48,13 @@ void TranslationsInDebugMessagesCheck::check( const MatchFinder::MatchResult &Re
+     if( toStringDecl ) {
+         diag(
+             translationCall->getBeginLoc(),
+-            "string arguments to debug message functions should not be translated, because this "
+-            "is an unnecessary performance cost.  This call to to_string might involve a "
+-            "translation; consider using to_string_writable instead."
++            "string arguments to debug message functions should not be translated. This call "
++            "to to_string might involve a translation; consider using to_string_writable instead."
+         );
+     } else {
+         diag(
+             translationCall->getBeginLoc(),
+-            "string arguments to debug message functions should not be translated, because this "
+-            "is an unnecessary performance cost."
++            "string arguments to debug message functions should not be translated."
+         );
+     }
+ }
+diff --git a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+index 4a97e73d7c83c..766bf370a0db3 100644
+--- a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
++++ b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+@@ -8,15 +8,33 @@
+ static void f( const time_duration &duration, Creature &c )
+ {
+     char *skill_level;
++    add_msg_debug(debugmode::DF_ACT_BUTCHER, _("Skill: %s"), skill_level);
++    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
++
++    add_msg_debug(debugmode::DF_ACT_BUTCHER, _("Skill"));
++    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
++
++    add_msg_debug(debugmode::DF_ACT_BUTCHER, pgettext("Skill", "foo"));
++    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
++
++    add_msg_debug(debugmode::DF_ACT_BUTCHER, n_gettext("Skill", "Skills", 0));
++    // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
++
++    add_msg_debug(debugmode::DF_ACT_BUTCHER, "%s", to_translation("Skill"));
++    // CHECK-MESSAGES: [[@LINE-1]]:53: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
++
+     add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill: %s" ), skill_level );
+-    // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
++    // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+     add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
++    // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+     c.add_msg_debug_if_player( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:59: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
++    // CHECK-MESSAGES: [[@LINE-1]]:59: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+     c.add_msg_debug_if_npc( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:56: warning: string arguments to debug message functions should not be translated, because this is an unnecessary performance cost. [cata-translations-in-debug-messages]
++    // CHECK-MESSAGES: [[@LINE-1]]:56: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
++
++    add_msg_debug(debugmode::DF_ACT_BUTCHER, "Duration %s", to_string(duration));
++    // CHECK-MESSAGES: [[@LINE-1]]:62: warning: string arguments to debug message functions should not be translated.  This call to to_string might involve a translation; consider using to_string_writable instead. [cata-translations-in-debug-messages]
+ }
+
+From 53addb9403682592a788192f9584d1116b5d64e6 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 10:08:33 -0800
+Subject: [PATCH 06/11] astyle the tools directory
+
+---
+ .../test/translations-in-debug-messages.cpp          | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+index 766bf370a0db3..366b0e8970c57 100644
+--- a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
++++ b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+@@ -8,19 +8,19 @@
+ static void f( const time_duration &duration, Creature &c )
+ {
+     char *skill_level;
+-    add_msg_debug(debugmode::DF_ACT_BUTCHER, _("Skill: %s"), skill_level);
++    add_msg_debug( debugmode::DF_ACT_BUTCHER, _( "Skill: %s" ), skill_level );
+     // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    add_msg_debug(debugmode::DF_ACT_BUTCHER, _("Skill"));
++    add_msg_debug( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    add_msg_debug(debugmode::DF_ACT_BUTCHER, pgettext("Skill", "foo"));
++    add_msg_debug( debugmode::DF_ACT_BUTCHER, pgettext( "Skill", "foo" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    add_msg_debug(debugmode::DF_ACT_BUTCHER, n_gettext("Skill", "Skills", 0));
++    add_msg_debug( debugmode::DF_ACT_BUTCHER, n_gettext( "Skill", "Skills", 0 ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:47: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    add_msg_debug(debugmode::DF_ACT_BUTCHER, "%s", to_translation("Skill"));
++    add_msg_debug( debugmode::DF_ACT_BUTCHER, "%s", to_translation( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:53: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+     add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill: %s" ), skill_level );
+@@ -35,6 +35,6 @@ static void f( const time_duration &duration, Creature &c )
+     c.add_msg_debug_if_npc( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:56: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    add_msg_debug(debugmode::DF_ACT_BUTCHER, "Duration %s", to_string(duration));
++    add_msg_debug( debugmode::DF_ACT_BUTCHER, "Duration %s", to_string( duration ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:62: warning: string arguments to debug message functions should not be translated.  This call to to_string might involve a translation; consider using to_string_writable instead. [cata-translations-in-debug-messages]
+ }
+
+From 35aef7516060e811caee45532624baea59fd1755 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 11:27:02 -0800
+Subject: [PATCH 07/11] Turn more debug message functions into macros.
+
+---
+ src/activity_actor.cpp                        |  4 +-
+ src/character.cpp                             | 15 +----
+ src/character.h                               |  6 --
+ src/creature.cpp                              |  6 --
+ src/creature.h                                | 62 -------------------
+ src/game.cpp                                  |  4 +-
+ src/mapgen.cpp                                |  4 +-
+ src/messages.h                                | 21 ++++---
+ src/monster.cpp                               | 12 ----
+ src/monster.h                                 |  5 --
+ src/npc.cpp                                   | 14 -----
+ src/npc.h                                     |  8 ---
+ .../test/translations-in-debug-messages.cpp   |  4 +-
+ 13 files changed, 22 insertions(+), 143 deletions(-)
+
+diff --git a/src/activity_actor.cpp b/src/activity_actor.cpp
+index 90e4939e5b3d8..403b741f8b5ae 100644
+--- a/src/activity_actor.cpp
++++ b/src/activity_actor.cpp
+@@ -3687,8 +3687,8 @@ void workout_activity_actor::do_turn( player_activity &act, Character &who )
+             who.add_morale( MORALE_FEELING_GOOD, intensity_modifier, 20, 6_hours, 30_minutes );
+         }
+         if( calendar::once_every( 2_minutes ) ) {
+-            who.add_msg_debug_if_player( debugmode::DF_ACT_WORKOUT, who.activity_level_str() );
+-            who.add_msg_debug_if_player( debugmode::DF_ACT_WORKOUT, act.id().c_str() );
++            add_msg_debug_if_player( who, debugmode::DF_ACT_WORKOUT, who.activity_level_str() );
++            add_msg_debug_if_player( who, debugmode::DF_ACT_WORKOUT, act.id().c_str() );
+         }
+     } else if( !rest_mode ) {
+         rest_mode = true;
+diff --git a/src/character.cpp b/src/character.cpp
+index 4131e5a0bd659..d1d3c460ccb73 100644
+--- a/src/character.cpp
++++ b/src/character.cpp
+@@ -870,12 +870,6 @@ void Character::add_msg_if_player( const game_message_params &params, const std:
+     Messages::add_msg( params, msg );
+ }
+ 
+-void Character::add_msg_debug_if_player( debugmode::debug_filter type,
+-        const std::string &msg ) const
+-{
+-    add_msg_debug( type, msg );
+-}
+-
+ void Character::add_msg_player_or_npc( const game_message_params &params,
+                                        const std::string &player_msg,
+                                        const std::string &/*npc_msg*/ ) const
+@@ -883,13 +877,6 @@ void Character::add_msg_player_or_npc( const game_message_params &params,
+     Messages::add_msg( params, player_msg );
+ }
+ 
+-void Character::add_msg_debug_player_or_npc( debugmode::debug_filter type,
+-        const std::string &player_msg,
+-        const std::string &/*npc_msg*/ ) const
+-{
+-    add_msg_debug( type, player_msg );
+-}
+-
+ void Character::add_msg_player_or_say( const std::string &player_msg,
+                                        const std::string &/*npc_speech*/ ) const
+ {
+@@ -5105,7 +5092,7 @@ needs_rates Character::calc_needs_rates() const
+ 
+     rates.kcal = get_bmr();
+ 
+-    add_msg_debug_if_player( debugmode::DF_CHAR_CALORIES, "Metabolic rate: %.2f", rates.hunger );
++    add_msg_debug_if_player( *this, debugmode::DF_CHAR_CALORIES, "Metabolic rate: %.2f", rates.hunger );
+ 
+     static const std::string player_thirst_rate( "PLAYER_THIRST_RATE" );
+     rates.thirst = get_option< float >( player_thirst_rate );
+diff --git a/src/character.h b/src/character.h
+index 7b3b1d58dafe9..0d78a01b8f444 100644
+--- a/src/character.h
++++ b/src/character.h
+@@ -727,17 +727,11 @@ class Character : public Creature, public visitable
+         using Creature::add_msg_if_player;
+         void add_msg_if_player( const std::string &msg ) const override;
+         void add_msg_if_player( const game_message_params &params, const std::string &msg ) const override;
+-        using Creature::add_msg_debug_if_player;
+-        void add_msg_debug_if_player( debugmode::debug_filter type,
+-                                      const std::string &msg ) const override;
+         using Creature::add_msg_player_or_npc;
+         void add_msg_player_or_npc( const std::string &player_msg,
+                                     const std::string &npc_str ) const override;
+         void add_msg_player_or_npc( const game_message_params &params, const std::string &player_msg,
+                                     const std::string &npc_msg ) const override;
+-        using Creature::add_msg_debug_player_or_npc;
+-        void add_msg_debug_player_or_npc( debugmode::debug_filter type, const std::string &player_msg,
+-                                          const std::string &npc_msg ) const override;
+         using Creature::add_msg_player_or_say;
+         void add_msg_player_or_say( const std::string &player_msg,
+                                     const std::string &npc_speech ) const override;
+diff --git a/src/creature.cpp b/src/creature.cpp
+index 9699620efb2ff..e3d3f55ce9df6 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -3144,12 +3144,6 @@ void Creature::add_msg_player_or_npc( const game_message_params &params, const t
+     return add_msg_player_or_npc( params, pc.translated(), npc.translated() );
+ }
+ 
+-void Creature::add_msg_debug_player_or_npc( debugmode::debug_filter type, const translation &pc,
+-        const translation &npc ) const
+-{
+-    return add_msg_debug_player_or_npc( type, pc.translated(), npc.translated() );
+-}
+-
+ void Creature::add_msg_player_or_say( const translation &pc, const translation &npc ) const
+ {
+     return add_msg_player_or_say( pc.translated(), npc.translated() );
+diff --git a/src/creature.h b/src/creature.h
+index a20b0cf700b53..7798dcfff2c1f 100644
+--- a/src/creature.h
++++ b/src/creature.h
+@@ -1111,68 +1111,6 @@ class Creature : public viewer
+                                           string_format( npc_msg, std::forward<Args>( args )... ) );
+         }
+ 
+-        virtual void add_msg_debug_if_player( debugmode::debug_filter /*type*/,
+-                                              const std::string &/*msg*/ ) const {}
+-        template<typename ...Args>
+-        void add_msg_debug_if_player( debugmode::debug_filter type, const char *const msg,
+-                                      Args &&... args ) const {
+-            // expanding for string formatting can be expensive
+-            if( debug_mode ) {
+-                return add_msg_debug_if_player( type, string_format( msg, std::forward<Args>( args )... ) );
+-            }
+-        }
+-        template<typename ...Args>
+-        void add_msg_debug_if_player( debugmode::debug_filter type, const std::string &msg,
+-                                      Args &&... args ) const {
+-            if( debug_mode ) {
+-                return add_msg_debug_if_player( type, string_format( msg, std::forward<Args>( args )... ) );
+-            }
+-        }
+-
+-        virtual void add_msg_debug_if_npc( debugmode::debug_filter /*type*/,
+-                                           const std::string &/*msg*/ ) const {}
+-        template<typename ...Args>
+-        void add_msg_debug_if_npc( debugmode::debug_filter type, const char *const msg,
+-                                   Args &&... args ) const {
+-            // expanding for string formatting can be expensive
+-            if( debug_mode ) {
+-                return add_msg_debug_if_npc( type, string_format( msg, std::forward<Args>( args )... ) );
+-            }
+-        }
+-        template<typename ...Args>
+-        void add_msg_debug_if_npc( debugmode::debug_filter type, const std::string &msg,
+-                                   Args &&... args ) const {
+-            if( debug_mode ) {
+-                return add_msg_debug_if_npc( type, string_format( msg, std::forward<Args>( args )... ) );
+-            }
+-        }
+-
+-        virtual void add_msg_debug_player_or_npc( debugmode::debug_filter /*type*/,
+-                const std::string &/*player_msg*/,
+-                const std::string &/*npc_msg*/ ) const {}
+-        void add_msg_debug_player_or_npc( debugmode::debug_filter /*type*/,
+-                                          const translation &/*player_msg*/,
+-                                          const translation &/*npc_msg*/ ) const;
+-        template<typename ...Args>
+-        void add_msg_debug_player_or_npc( debugmode::debug_filter type, const char *const player_msg,
+-                                          const char *const npc_msg, Args &&... args ) const {
+-            // expanding for string formatting can be expensive
+-            if( debug_mode ) {
+-                return add_msg_debug_player_or_npc( type, string_format( player_msg,
+-                                                    std::forward<Args>( args )... ),
+-                                                    string_format( npc_msg, std::forward<Args>( args )... ) );
+-            }
+-        }
+-        template<typename ...Args>
+-        void add_msg_debug_player_or_npc( debugmode::debug_filter type, const std::string &player_msg,
+-                                          const std::string &npc_msg, Args &&... args ) const {
+-            if( debug_mode ) {
+-                return add_msg_debug_player_or_npc( type, string_format( player_msg,
+-                                                    std::forward<Args>( args )... ),
+-                                                    string_format( npc_msg, std::forward<Args>( args )... ) );
+-            }
+-        }
+-
+         virtual void add_msg_player_or_say( const std::string &/*player_msg*/,
+                                             const std::string &/*npc_speech*/ ) const {}
+         virtual void add_msg_player_or_say( const game_message_params &/*params*/,
+diff --git a/src/game.cpp b/src/game.cpp
+index 195a4d99371a1..5662c9d61cfbc 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -5325,8 +5325,8 @@ bool game::spawn_npc( const tripoint &p, const string_id<npc_template> &npc_clas
+                       std::vector<trait_id> &traits, std::optional<time_duration> lifespan )
+ {
+     if( !unique_id.empty() && g->unique_npc_exists( unique_id ) ) {
+-        get_avatar().add_msg_debug_if_player( debugmode::DF_NPC, "NPC with unique id %s already exists.",
+-                                              unique_id );
++        add_msg_debug_if_player( get_avatar(), debugmode::DF_NPC, "NPC with unique id %s already exists.",
++                                 unique_id );
+         return false;
+     }
+     shared_ptr_fast<npc> tmp = make_shared_fast<npc>();
+diff --git a/src/mapgen.cpp b/src/mapgen.cpp
+index 442ec509449f3..81bf349b04462 100644
+--- a/src/mapgen.cpp
++++ b/src/mapgen.cpp
+@@ -1830,8 +1830,8 @@ class jmapgen_npc : public jmapgen_piece
+                 return;
+             }
+             if( !unique_id.empty() && g->unique_npc_exists( unique_id ) ) {
+-                get_avatar().add_msg_debug_if_player( debugmode::DF_NPC, "NPC with unique id %s already exists.",
+-                                                      unique_id );
++                add_msg_debug_if_player( get_avatar(), debugmode::DF_NPC, "NPC with unique id %s already exists.",
++                                         unique_id );
+                 return;
+             }
+             tripoint const dst( x.get(), y.get(), dat.m.get_abs_sub().z() );
+diff --git a/src/messages.h b/src/messages.h
+index 16a1bddc354b3..d928430ee33a6 100644
+--- a/src/messages.h
++++ b/src/messages.h
+@@ -167,19 +167,24 @@ inline T &&clang_tidy_no_translations( T &&t )
+     return std::forward<T>( t );
+ }
+ 
+-#define add_msg_debug(type, ...)                                                                        \
++#define add_msg_debug_if(condition, type, ...)                                                          \
+     do {                                                                                                \
+-        if( Messages::has_debug_filter( type ) ) {                                                      \
++        if( Messages::has_debug_filter( type ) && ( condition ) ) {                                     \
+             Messages::add_msg( m_debug, clang_tidy_no_translations( string_format( __VA_ARGS__ ) ) );   \
+         }                                                                                               \
+     } while( false )
+ 
+-#define add_msg_debug_if_player_sees(target, type, ...)                                                 \
+-    do {                                                                                                \
+-        if( Messages::has_debug_filter( type ) && get_player_view().sees( target ) ) {                  \
+-            Messages::add_msg( m_debug, clang_tidy_no_translations( string_format( __VA_ARGS__ ) ) );   \
+-        }                                                                                               \
+-    } while( false )
++#define add_msg_debug(type, ...) \
++    add_msg_debug_if( true, type, __VA_ARGS__ )
++
++#define add_msg_debug_if_player(target, type, ...) \
++    add_msg_debug_if( ( target ).is_avatar(), type, __VA_ARGS__ )
++
++#define add_msg_debug_if_npc(target, type, ...) \
++    add_msg_debug_if( ( target ).is_npc(), type, __VA_ARGS__ )
++
++#define add_msg_debug_if_player_sees(target, type, ...) \
++    add_msg_debug_if( get_player_view().sees( target ), type, __VA_ARGS__ )
+ 
+ void modify_msg_with_exclamations( std::string &msg, game_message_type type );
+ 
+diff --git a/src/monster.cpp b/src/monster.cpp
+index bb2ea56357524..59d38134b8406 100644
+--- a/src/monster.cpp
++++ b/src/monster.cpp
+@@ -3516,24 +3516,12 @@ void monster::add_msg_if_npc( const game_message_params &params, const std::stri
+     add_msg_if_player_sees( *this, params, replace_with_npc_name( msg ) );
+ }
+ 
+-void monster::add_msg_debug_if_npc( debugmode::debug_filter type, const std::string &msg ) const
+-{
+-    add_msg_debug_if_player_sees( *this, type, replace_with_npc_name( msg ) );
+-}
+-
+ void monster::add_msg_player_or_npc( const game_message_params &params,
+                                      const std::string &/*player_msg*/, const std::string &npc_msg ) const
+ {
+     add_msg_if_player_sees( *this, params, replace_with_npc_name( npc_msg ) );
+ }
+ 
+-void monster::add_msg_debug_player_or_npc( debugmode::debug_filter type,
+-        const std::string &/*player_msg*/,
+-        const std::string &npc_msg ) const
+-{
+-    add_msg_debug_if_player_sees( *this, type, replace_with_npc_name( npc_msg ) );
+-}
+-
+ units::mass monster::get_carried_weight() const
+ {
+     units::mass total_weight = 0_gram;
+diff --git a/src/monster.h b/src/monster.h
+index 1ec70f3285b36..86fd61e71c750 100644
+--- a/src/monster.h
++++ b/src/monster.h
+@@ -505,16 +505,11 @@ class monster : public Creature
+         using Creature::add_msg_if_npc;
+         void add_msg_if_npc( const std::string &msg ) const override;
+         void add_msg_if_npc( const game_message_params &params, const std::string &msg ) const override;
+-        using Creature::add_msg_debug_if_npc;
+-        void add_msg_debug_if_npc( debugmode::debug_filter type, const std::string &msg ) const override;
+         using Creature::add_msg_player_or_npc;
+         void add_msg_player_or_npc( const std::string &player_msg,
+                                     const std::string &npc_msg ) const override;
+         void add_msg_player_or_npc( const game_message_params &params, const std::string &player_msg,
+                                     const std::string &npc_msg ) const override;
+-        using Creature::add_msg_debug_player_or_npc;
+-        void add_msg_debug_player_or_npc( debugmode::debug_filter type, const std::string &player_msg,
+-                                          const std::string &npc_msg ) const override;
+ 
+         // currently grabbed limbs
+         std::unordered_set<bodypart_str_id> grabbed_limbs;
+diff --git a/src/npc.cpp b/src/npc.cpp
+index e33989a375fc9..ab2b2cf40efbe 100644
+--- a/src/npc.cpp
++++ b/src/npc.cpp
+@@ -3157,11 +3157,6 @@ void npc::add_msg_if_npc( const game_message_params &params, const std::string &
+     add_msg( params, replace_with_npc_name( msg ) );
+ }
+ 
+-void npc::add_msg_debug_if_npc( debugmode::debug_filter type, const std::string &msg ) const
+-{
+-    add_msg_debug( type, replace_with_npc_name( msg ) );
+-}
+-
+ void npc::add_msg_player_or_npc( const game_message_params &params,
+                                  const std::string &/*player_msg*/,
+                                  const std::string &npc_msg ) const
+@@ -3171,15 +3166,6 @@ void npc::add_msg_player_or_npc( const game_message_params &params,
+     }
+ }
+ 
+-void npc::add_msg_debug_player_or_npc( debugmode::debug_filter type,
+-                                       const std::string &/*player_msg*/,
+-                                       const std::string &npc_msg ) const
+-{
+-    if( get_player_view().sees( *this ) ) {
+-        add_msg_debug( type, replace_with_npc_name( npc_msg ) );
+-    }
+-}
+-
+ void npc::add_msg_player_or_say( const std::string &/*player_msg*/,
+                                  const std::string &npc_speech ) const
+ {
+diff --git a/src/npc.h b/src/npc.h
+index 1e562ddeda778..15d903923e1c9 100644
+--- a/src/npc.h
++++ b/src/npc.h
+@@ -1256,23 +1256,15 @@ class npc : public Character
+         using Character::add_msg_if_npc;
+         void add_msg_if_npc( const std::string &msg ) const override;
+         void add_msg_if_npc( const game_message_params &params, const std::string &msg ) const override;
+-        using Character::add_msg_debug_if_npc;
+-        void add_msg_debug_if_npc( debugmode::debug_filter type, const std::string &msg ) const override;
+         using Character::add_msg_player_or_npc;
+         void add_msg_player_or_npc( const std::string &player_msg,
+                                     const std::string &npc_msg ) const override;
+         void add_msg_player_or_npc( const game_message_params &params, const std::string &player_msg,
+                                     const std::string &npc_msg ) const override;
+-        using Character::add_msg_debug_player_or_npc;
+-        void add_msg_debug_player_or_npc( debugmode::debug_filter type, const std::string &player_msg,
+-                                          const std::string &npc_msg ) const override;
+         using Character::add_msg_if_player;
+         void add_msg_if_player( const std::string &/*msg*/ ) const override {}
+         void add_msg_if_player( const game_message_params &/*type*/,
+                                 const std::string &/*msg*/ ) const override {}
+-        using Character::add_msg_debug_if_player;
+-        void add_msg_debug_if_player( debugmode::debug_filter /*type*/,
+-                                      const std::string &/*msg*/ ) const override {}
+         using Character::add_msg_player_or_say;
+         void add_msg_player_or_say( const std::string &player_msg,
+                                     const std::string &npc_speech ) const override;
+diff --git a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+index 366b0e8970c57..c8dcf8fb8fa32 100644
+--- a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
++++ b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+@@ -29,10 +29,10 @@ static void f( const time_duration &duration, Creature &c )
+     add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    c.add_msg_debug_if_player( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
++    add_msg_debug_if_player( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:59: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    c.add_msg_debug_if_npc( debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
++    add_msg_debug_if_npc( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:56: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+     add_msg_debug( debugmode::DF_ACT_BUTCHER, "Duration %s", to_string( duration ) );
+
+From 532256092b4f69cc0006f90066c2b826372160de Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 11:44:39 -0800
+Subject: [PATCH 08/11] Remove some unused debug message types.
+
+---
+ src/activity_actor.cpp                                      | 4 ++--
+ src/character.cpp                                           | 2 +-
+ src/game.cpp                                                | 3 +--
+ src/mapgen.cpp                                              | 3 +--
+ src/messages.h                                              | 6 ------
+ .../test/translations-in-debug-messages.cpp                 | 5 +----
+ 6 files changed, 6 insertions(+), 17 deletions(-)
+
+diff --git a/src/activity_actor.cpp b/src/activity_actor.cpp
+index 403b741f8b5ae..9c676ee8a4cbd 100644
+--- a/src/activity_actor.cpp
++++ b/src/activity_actor.cpp
+@@ -3687,8 +3687,8 @@ void workout_activity_actor::do_turn( player_activity &act, Character &who )
+             who.add_morale( MORALE_FEELING_GOOD, intensity_modifier, 20, 6_hours, 30_minutes );
+         }
+         if( calendar::once_every( 2_minutes ) ) {
+-            add_msg_debug_if_player( who, debugmode::DF_ACT_WORKOUT, who.activity_level_str() );
+-            add_msg_debug_if_player( who, debugmode::DF_ACT_WORKOUT, act.id().c_str() );
++            add_msg_debug_if( who.is_avatar(), debugmode::DF_ACT_WORKOUT, who.activity_level_str() );
++            add_msg_debug_if( who.is_avatar(), debugmode::DF_ACT_WORKOUT, act.id().c_str() );
+         }
+     } else if( !rest_mode ) {
+         rest_mode = true;
+diff --git a/src/character.cpp b/src/character.cpp
+index d1d3c460ccb73..caa1aba274010 100644
+--- a/src/character.cpp
++++ b/src/character.cpp
+@@ -5092,7 +5092,7 @@ needs_rates Character::calc_needs_rates() const
+ 
+     rates.kcal = get_bmr();
+ 
+-    add_msg_debug_if_player( *this, debugmode::DF_CHAR_CALORIES, "Metabolic rate: %.2f", rates.hunger );
++    add_msg_debug_if( is_avatar(), debugmode::DF_CHAR_CALORIES, "Metabolic rate: %.2f", rates.hunger );
+ 
+     static const std::string player_thirst_rate( "PLAYER_THIRST_RATE" );
+     rates.thirst = get_option< float >( player_thirst_rate );
+diff --git a/src/game.cpp b/src/game.cpp
+index 5662c9d61cfbc..b1edf92a6b9b0 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -5325,8 +5325,7 @@ bool game::spawn_npc( const tripoint &p, const string_id<npc_template> &npc_clas
+                       std::vector<trait_id> &traits, std::optional<time_duration> lifespan )
+ {
+     if( !unique_id.empty() && g->unique_npc_exists( unique_id ) ) {
+-        add_msg_debug_if_player( get_avatar(), debugmode::DF_NPC, "NPC with unique id %s already exists.",
+-                                 unique_id );
++        add_msg_debug( debugmode::DF_NPC, "NPC with unique id %s already exists.", unique_id );
+         return false;
+     }
+     shared_ptr_fast<npc> tmp = make_shared_fast<npc>();
+diff --git a/src/mapgen.cpp b/src/mapgen.cpp
+index 81bf349b04462..3cf9ba4b06f96 100644
+--- a/src/mapgen.cpp
++++ b/src/mapgen.cpp
+@@ -1830,8 +1830,7 @@ class jmapgen_npc : public jmapgen_piece
+                 return;
+             }
+             if( !unique_id.empty() && g->unique_npc_exists( unique_id ) ) {
+-                add_msg_debug_if_player( get_avatar(), debugmode::DF_NPC, "NPC with unique id %s already exists.",
+-                                         unique_id );
++                add_msg_debug( debugmode::DF_NPC, "NPC with unique id %s already exists.", unique_id );
+                 return;
+             }
+             tripoint const dst( x.get(), y.get(), dat.m.get_abs_sub().z() );
+diff --git a/src/messages.h b/src/messages.h
+index d928430ee33a6..01e256639821d 100644
+--- a/src/messages.h
++++ b/src/messages.h
+@@ -177,12 +177,6 @@ inline T &&clang_tidy_no_translations( T &&t )
+ #define add_msg_debug(type, ...) \
+     add_msg_debug_if( true, type, __VA_ARGS__ )
+ 
+-#define add_msg_debug_if_player(target, type, ...) \
+-    add_msg_debug_if( ( target ).is_avatar(), type, __VA_ARGS__ )
+-
+-#define add_msg_debug_if_npc(target, type, ...) \
+-    add_msg_debug_if( ( target ).is_npc(), type, __VA_ARGS__ )
+-
+ #define add_msg_debug_if_player_sees(target, type, ...) \
+     add_msg_debug_if( get_player_view().sees( target ), type, __VA_ARGS__ )
+ 
+diff --git a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+index c8dcf8fb8fa32..98750879c9906 100644
+--- a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
++++ b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+@@ -29,10 +29,7 @@ static void f( const time_duration &duration, Creature &c )
+     add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    add_msg_debug_if_player( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:59: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+-
+-    add_msg_debug_if_npc( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
++    add_msg_debug_if( true, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:56: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+     add_msg_debug( debugmode::DF_ACT_BUTCHER, "Duration %s", to_string( duration ) );
+
+From a83a17467cfa09142407b185f12d866c6fd6c5f7 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 11:56:05 -0800
+Subject: [PATCH 09/11] Remove another debug message type that wasn't being
+ used.
+
+---
+ src/messages.h                                              | 3 ---
+ .../test/translations-in-debug-messages.cpp                 | 6 ------
+ 2 files changed, 9 deletions(-)
+
+diff --git a/src/messages.h b/src/messages.h
+index 01e256639821d..147f69bda7180 100644
+--- a/src/messages.h
++++ b/src/messages.h
+@@ -177,9 +177,6 @@ inline T &&clang_tidy_no_translations( T &&t )
+ #define add_msg_debug(type, ...) \
+     add_msg_debug_if( true, type, __VA_ARGS__ )
+ 
+-#define add_msg_debug_if_player_sees(target, type, ...) \
+-    add_msg_debug_if( get_player_view().sees( target ), type, __VA_ARGS__ )
+-
+ void modify_msg_with_exclamations( std::string &msg, game_message_type type );
+ 
+ #endif // CATA_SRC_MESSAGES_H
+diff --git a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+index 98750879c9906..73787e6397bca 100644
+--- a/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
++++ b/tools/clang-tidy-plugin/test/translations-in-debug-messages.cpp
+@@ -23,12 +23,6 @@ static void f( const time_duration &duration, Creature &c )
+     add_msg_debug( debugmode::DF_ACT_BUTCHER, "%s", to_translation( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:53: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+-    add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill: %s" ), skill_level );
+-    // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+-
+-    add_msg_debug_if_player_sees( c, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+-    // CHECK-MESSAGES: [[@LINE-1]]:65: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+-
+     add_msg_debug_if( true, debugmode::DF_ACT_BUTCHER, _( "Skill" ) );
+     // CHECK-MESSAGES: [[@LINE-1]]:56: warning: string arguments to debug message functions should not be translated. [cata-translations-in-debug-messages]
+ 
+
+From 78a5effb01b909aaaf944e2a57a8804c28bf34c4 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 20 Nov 2023 14:32:49 -0800
+Subject: [PATCH 10/11] Add extra space for clang-tidy
+
+---
+ tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp b/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp
+index c8b526a8adc8f..fced8d98afc72 100644
+--- a/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp
++++ b/tools/clang-tidy-plugin/TranslationsInDebugMessagesCheck.cpp
+@@ -48,7 +48,7 @@ void TranslationsInDebugMessagesCheck::check( const MatchFinder::MatchResult &Re
+     if( toStringDecl ) {
+         diag(
+             translationCall->getBeginLoc(),
+-            "string arguments to debug message functions should not be translated. This call "
++            "string arguments to debug message functions should not be translated.  This call "
+             "to to_string might involve a translation; consider using to_string_writable instead."
+         );
+     } else {
+
+From 399e9846bb88f8e0f97f035d09527c65ed21138d Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 1 Jan 2024 13:47:25 -0700
+Subject: [PATCH 11/11] Lift global bool into define to skip function call.
+
+---
+ src/messages.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/messages.h b/src/messages.h
+index 147f69bda7180..c62725334be7b 100644
+--- a/src/messages.h
++++ b/src/messages.h
+@@ -169,7 +169,7 @@ inline T &&clang_tidy_no_translations( T &&t )
+ 
+ #define add_msg_debug_if(condition, type, ...)                                                          \
+     do {                                                                                                \
+-        if( Messages::has_debug_filter( type ) && ( condition ) ) {                                     \
++        if( debug_mode && Messages::has_debug_filter( type ) && ( condition ) ) {                       \
+             Messages::add_msg( m_debug, clang_tidy_no_translations( string_format( __VA_ARGS__ ) ) );   \
+         }                                                                                               \
+     } while( false )
