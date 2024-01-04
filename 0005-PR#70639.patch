@@ -1,0 +1,1060 @@
+From 62694e89b2d01947c8cfd633f79855f6885b25f5 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Wed, 3 Jan 2024 21:52:20 -0700
+Subject: [PATCH 1/9] Backport optimizations from new pathfinder into old one.
+ Achieves the same speed, but doesn't have the new bells and whistles.
+
+---
+ src/activity_item_handling.cpp |   4 +-
+ src/character.cpp              |   4 +-
+ src/character.h                |   2 +-
+ src/creature.h                 |   2 +-
+ src/game.cpp                   |   4 +-
+ src/map.cpp                    | 130 ++++++++++++++++----------------
+ src/map.h                      |  10 ++-
+ src/monmove.cpp                |  24 +++++-
+ src/monster.cpp                |   9 ++-
+ src/monster.h                  |  19 ++++-
+ src/npc.cpp                    |   4 +-
+ src/npc.h                      |   2 +-
+ src/pathfinding.cpp            | 131 ++++++++++++++++++++-------------
+ src/pathfinding.h              |   1 +
+ 14 files changed, 212 insertions(+), 134 deletions(-)
+
+diff --git a/src/activity_item_handling.cpp b/src/activity_item_handling.cpp
+index 88741fdb8346b..ad9047958e900 100644
+--- a/src/activity_item_handling.cpp
++++ b/src/activity_item_handling.cpp
+@@ -662,7 +662,7 @@ std::vector<tripoint_bub_ms> route_adjacent( const Character &you, const tripoin
+     const std::vector<tripoint_bub_ms> &sorted =
+         get_sorted_tiles_by_distance( you.pos_bub(), passable_tiles );
+ 
+-    const std::set<tripoint> &avoid = you.get_path_avoid();
++    const std::unordered_set<tripoint> &avoid = you.get_path_avoid();
+     for( const tripoint_bub_ms &tp : sorted ) {
+         std::vector<tripoint_bub_ms> route =
+             here.route( you.pos_bub(), tp, you.get_pathfinding_settings(), avoid );
+@@ -736,7 +736,7 @@ static std::vector<tripoint_bub_ms> route_best_workbench(
+         return best_bench_multi_a > best_bench_multi_b;
+     };
+     std::stable_sort( sorted.begin(), sorted.end(), cmp );
+-    const std::set<tripoint> &avoid = you.get_path_avoid();
++    const std::unordered_set<tripoint> &avoid = you.get_path_avoid();
+     if( sorted.front() == you.pos_bub() ) {
+         // We are on the best tile
+         return {};
+diff --git a/src/character.cpp b/src/character.cpp
+index 811c14a44c5e2..ef6cd7ab2b3a2 100644
+--- a/src/character.cpp
++++ b/src/character.cpp
+@@ -10039,9 +10039,9 @@ float Character::adjust_for_focus( float amount ) const
+     return amount * ( effective_focus / 100.0f );
+ }
+ 
+-std::set<tripoint> Character::get_path_avoid() const
++std::unordered_set<tripoint> Character::get_path_avoid() const
+ {
+-    std::set<tripoint> ret;
++    std::unordered_set<tripoint> ret;
+     for( npc &guy : g->all_npcs() ) {
+         if( sees( guy ) ) {
+             ret.insert( guy.pos() );
+diff --git a/src/character.h b/src/character.h
+index 46f4a8df651ad..609c771c84d7b 100644
+--- a/src/character.h
++++ b/src/character.h
+@@ -3184,7 +3184,7 @@ class Character : public Creature, public visitable
+         int run_cost( int base_cost, bool diag = false ) const;
+ 
+         const pathfinding_settings &get_pathfinding_settings() const override;
+-        std::set<tripoint> get_path_avoid() const override;
++        std::unordered_set<tripoint> get_path_avoid() const override;
+         /**
+          * Get all hostile creatures currently visible to this player.
+          */
+diff --git a/src/creature.h b/src/creature.h
+index a20b0cf700b53..889565c3d0c1f 100644
+--- a/src/creature.h
++++ b/src/creature.h
+@@ -933,7 +933,7 @@ class Creature : public viewer
+         /** Returns settings for pathfinding. */
+         virtual const pathfinding_settings &get_pathfinding_settings() const = 0;
+         /** Returns a set of points we do not want to path through. */
+-        virtual std::set<tripoint> get_path_avoid() const = 0;
++        virtual std::unordered_set<tripoint> get_path_avoid() const = 0;
+ 
+         int moves;
+         bool underwater;
+diff --git a/src/game.cpp b/src/game.cpp
+index 835f1f0fd266c..a8fdda7e78e25 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -4403,7 +4403,7 @@ Creature *game::is_hostile_within( int distance, bool dangerous )
+                 }
+ 
+                 const pathfinding_settings pf_settings = pathfinding_settings{ 8, distance, distance * 2, 4, true, true, false, true, false, false };
+-                static const std::set<tripoint> path_avoid = {};
++                static const std::unordered_set<tripoint> path_avoid = {};
+ 
+                 if( !get_map().route( u.pos(), critter->pos(), pf_settings, path_avoid ).empty() ) {
+                     return critter;
+@@ -7477,7 +7477,7 @@ std::optional<std::vector<tripoint_bub_ms>> game::safe_route_to( Character &who,
+         }
+     };
+     route_t shortest_route;
+-    std::set<tripoint> path_avoid;
++    std::unordered_set<tripoint> path_avoid;
+     for( const tripoint_bub_ms &p : points_in_radius( who.pos_bub(), 60 ) ) {
+         if( is_dangerous_tile( p.raw() ) ) {
+             path_avoid.insert( p.raw() );
+diff --git a/src/map.cpp b/src/map.cpp
+index 5b8fdfc4e48d3..81893dcb2605b 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1794,7 +1794,7 @@ bool map::furn_set( const tripoint &p, const furn_id &new_furniture, const bool
+         get_creature_tracker().invalidate_reachability_cache();
+     }
+     // TODO: Limit to changes that affect move cost, traps and stairs
+-    set_pathfinding_cache_dirty( p.z );
++    set_pathfinding_cache_dirty( p );
+ 
+     // Make sure the furniture falls if it needs to
+     support_dirty( p );
+@@ -2272,7 +2272,7 @@ bool map::ter_set( const tripoint &p, const ter_id &new_terrain, bool avoid_crea
+         get_creature_tracker().invalidate_reachability_cache();
+     }
+     // TODO: Limit to changes that affect move cost, traps and stairs
+-    set_pathfinding_cache_dirty( p.z );
++    set_pathfinding_cache_dirty( p );
+ 
+     tripoint above( p.xy(), p.z + 1 );
+     // Make sure that if we supported something and no longer do so, it falls down
+@@ -6515,7 +6515,7 @@ void map::on_field_modified( const tripoint &p, const field_type &fd_type )
+     }
+ 
+     if( fd_type.is_dangerous() ) {
+-        set_pathfinding_cache_dirty( p.z );
++        set_pathfinding_cache_dirty( p );
+     }
+ 
+     // Ensure blood type fields don't hang in the air
+@@ -10093,6 +10093,13 @@ void map::set_pathfinding_cache_dirty( const int zlev )
+     }
+ }
+ 
++void map::set_pathfinding_cache_dirty( const tripoint &p )
++{
++    if( inbounds( p ) ) {
++        get_pathfinding_cache( p.z ).dirty_points.insert( p.xy() );
++    }
++}
++
+ void map::queue_main_cleanup()
+ {
+     if( this != &get_map() ) {
+@@ -10124,85 +10131,82 @@ const pathfinding_cache &map::get_pathfinding_cache_ref( int zlev ) const
+     return cache;
+ }
+ 
+-void map::update_pathfinding_cache( int zlev ) const
++void map::update_pathfinding_cache( const tripoint &p ) const
+ {
+-    pathfinding_cache &cache = get_pathfinding_cache( zlev );
+-    if( !cache.dirty ) {
++    if( !inbounds( p ) ) {
+         return;
+     }
++    pathfinding_cache &cache = get_pathfinding_cache( p.z );
++    pf_special cur_value = PF_NORMAL;
+ 
+-    std::uninitialized_fill_n( &cache.special[0][0], MAPSIZE_X * MAPSIZE_Y, PF_NORMAL );
++    const_maptile tile = maptile_at_internal( p );
+ 
+-    for( int smx = 0; smx < my_MAPSIZE; ++smx ) {
+-        for( int smy = 0; smy < my_MAPSIZE; ++smy ) {
+-            const submap *cur_submap = get_submap_at_grid( { smx, smy, zlev } );
+-            if( !cur_submap ) {
+-                return;
+-            }
+-
+-            tripoint p( 0, 0, zlev );
+-
+-            for( int sx = 0; sx < SEEX; ++sx ) {
+-                p.x = sx + smx * SEEX;
+-                for( int sy = 0; sy < SEEY; ++sy ) {
+-                    p.y = sy + smy * SEEY;
+-
+-                    pf_special cur_value = PF_NORMAL;
++    const ter_t &terrain = tile.get_ter_t();
++    const furn_t &furniture = tile.get_furn_t();
++    const field &field = tile.get_field();
++    const map &here = get_map();
++    int part;
++    const vehicle *veh = veh_at_internal( p, part );
+ 
+-                    const_maptile tile( cur_submap, point( sx, sy ) );
++    const int cost = move_cost_internal( furniture, terrain, field, veh, part );
+ 
+-                    const ter_t &terrain = tile.get_ter_t();
+-                    const furn_t &furniture = tile.get_furn_t();
+-                    const field &field = tile.get_field();
+-                    const map &here = get_map();
+-                    int part;
+-                    const vehicle *veh = veh_at_internal( p, part );
++    if( cost > 2 ) {
++        cur_value |= PF_SLOW;
++    } else if( cost <= 0 ) {
++        cur_value |= PF_WALL;
++        if( terrain.has_flag( ter_furn_flag::TFLAG_CLIMBABLE ) ) {
++            cur_value |= PF_CLIMBABLE;
++        }
++    }
+ 
+-                    const int cost = move_cost_internal( furniture, terrain, field, veh, part );
++    if( veh != nullptr ) {
++        cur_value |= PF_VEHICLE;
++    }
+ 
+-                    if( cost > 2 ) {
+-                        cur_value |= PF_SLOW;
+-                    } else if( cost <= 0 ) {
+-                        cur_value |= PF_WALL;
+-                        if( terrain.has_flag( ter_furn_flag::TFLAG_CLIMBABLE ) ) {
+-                            cur_value |= PF_CLIMBABLE;
+-                        }
+-                    }
++    for( const auto &fld : tile.get_field() ) {
++        const field_entry &cur = fld.second;
++        if( cur.is_dangerous() ) {
++            cur_value |= PF_FIELD;
++        }
++    }
+ 
+-                    if( veh != nullptr ) {
+-                        cur_value |= PF_VEHICLE;
+-                    }
++    if( ( !tile.get_trap_t().is_benign() || !terrain.trap.obj().is_benign() ) &&
++        !here.has_vehicle_floor( p ) ) {
++        cur_value |= PF_TRAP;
++    }
+ 
+-                    for( const auto &fld : tile.get_field() ) {
+-                        const field_entry &cur = fld.second;
+-                        if( cur.is_dangerous() ) {
+-                            cur_value |= PF_FIELD;
+-                        }
+-                    }
++    if( terrain.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ||
++        terrain.has_flag( ter_furn_flag::TFLAG_GOES_UP ) ||
++        terrain.has_flag( ter_furn_flag::TFLAG_RAMP ) || terrain.has_flag( ter_furn_flag::TFLAG_RAMP_UP ) ||
++        terrain.has_flag( ter_furn_flag::TFLAG_RAMP_DOWN ) ) {
++        cur_value |= PF_UPDOWN;
++    }
+ 
+-                    if( ( !tile.get_trap_t().is_benign() || !terrain.trap.obj().is_benign() ) &&
+-                        !here.has_vehicle_floor( p ) ) {
+-                        cur_value |= PF_TRAP;
+-                    }
++    if( terrain.has_flag( ter_furn_flag::TFLAG_SHARP ) && !here.has_vehicle_floor( p ) ) {
++        cur_value |= PF_SHARP;
++    }
+ 
+-                    if( terrain.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ||
+-                        terrain.has_flag( ter_furn_flag::TFLAG_GOES_UP ) ||
+-                        terrain.has_flag( ter_furn_flag::TFLAG_RAMP ) || terrain.has_flag( ter_furn_flag::TFLAG_RAMP_UP ) ||
+-                        terrain.has_flag( ter_furn_flag::TFLAG_RAMP_DOWN ) ) {
+-                        cur_value |= PF_UPDOWN;
+-                    }
++    cache.special[p.x][p.y] = cur_value;
++}
+ 
+-                    if( terrain.has_flag( ter_furn_flag::TFLAG_SHARP ) && !here.has_vehicle_floor( p ) ) {
+-                        cur_value |= PF_SHARP;
+-                    }
++void map::update_pathfinding_cache( int zlev ) const
++{
++    pathfinding_cache &cache = get_pathfinding_cache( zlev );
+ 
+-                    cache.special[p.x][p.y] = cur_value;
+-                }
++    if( cache.dirty ) {
++        const int size = getmapsize();
++        for( int x = 0; x < size * SEEX; ++x ) {
++            for( int y = 0; y < size * SEEX; ++y ) {
++                update_pathfinding_cache( { x, y, zlev } );
+             }
+         }
++        cache.dirty = false;
++        cache.dirty_points.clear();
+     }
+ 
+-    cache.dirty = false;
++    for( const point &p : cache.dirty_points ) {
++        update_pathfinding_cache( { p, zlev} );
++    }
+ }
+ 
+ void map::clip_to_bounds( tripoint &p ) const
+diff --git a/src/map.h b/src/map.h
+index 83517a17a32e9..07cfea9f2126b 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -390,6 +390,7 @@ class map
+         void set_outside_cache_dirty( int zlev );
+         void set_floor_cache_dirty( int zlev );
+         void set_pathfinding_cache_dirty( int zlev );
++        void set_pathfinding_cache_dirty( const tripoint &p );
+         /*@}*/
+ 
+         void invalidate_map_cache( int zlev );
+@@ -693,10 +694,14 @@ class map
+         // TODO: fix point types (remove the first overload)
+         std::vector<tripoint> route( const tripoint &f, const tripoint &t,
+                                      const pathfinding_settings &settings,
+-        const std::set<tripoint> &pre_closed = {{ }} ) const;
++        const std::unordered_set<tripoint> &pre_closed = {{ }} ) const;
+         std::vector<tripoint_bub_ms> route( const tripoint_bub_ms &f, const tripoint_bub_ms &t,
+                                             const pathfinding_settings &settings,
+-        const std::set<tripoint> &pre_closed = {{ }} ) const;
++        const std::unordered_set<tripoint> &pre_closed = {{ }} ) const;
++
++        // Get a straight route from f to t, only along non-rough terrain. Returns an empty vector
++        // if that is not possible.
++        std::vector<tripoint> straight_route( const tripoint &f, const tripoint &t ) const;
+ 
+         // Vehicles: Common to 2D and 3D
+         VehicleList get_vehicles();
+@@ -2286,6 +2291,7 @@ class map
+ 
+         const pathfinding_cache &get_pathfinding_cache_ref( int zlev ) const;
+ 
++        void update_pathfinding_cache( const tripoint &p ) const;
+         void update_pathfinding_cache( int zlev ) const;
+ 
+         void update_visibility_cache( int zlev );
+diff --git a/src/monmove.cpp b/src/monmove.cpp
+index a3b6e8f9eed54..6c9abafdb68b9 100644
+--- a/src/monmove.cpp
++++ b/src/monmove.cpp
+@@ -282,7 +282,8 @@ bool monster::know_danger_at( const tripoint &p ) const
+             }
+ 
+             // Some things are only avoided if we're not attacking
+-            if( attitude( &get_player_character() ) != MATT_ATTACK ) {
++            if( get_player_character().get_location() == get_dest() &&
++                attitude( &get_player_character() ) != MATT_ATTACK ) {
+                 // Sharp terrain is ignored while attacking
+                 if( avoid_sharp && here.has_flag( ter_furn_flag::TFLAG_SHARP, p ) &&
+                     !( type->size == creature_size::tiny || flies() ||
+@@ -1068,7 +1069,26 @@ void monster::move()
+             if( pf_settings.max_dist >= rl_dist( get_location(), get_dest() ) &&
+                 ( path.empty() || rl_dist( pos(), path.front() ) >= 2 || path.back() != local_dest ) ) {
+                 // We need a new path
+-                path = here.route( pos(), local_dest, pf_settings, get_path_avoid() );
++                if( can_pathfind() ) {
++                    path = here.route( pos(), local_dest, pf_settings, get_path_avoid() );
++                    if( path.empty() ) {
++                        increment_pathfinding_cd();
++                    }
++                } else {
++                    path = here.straight_route( pos(), local_dest );
++                    if( !path.empty() ) {
++                        std::unordered_set<tripoint> closed = get_path_avoid();
++                        for( const tripoint &p : path ) {
++                            if( closed.count( p ) ) {
++                                path.clear();
++                                break;
++                            }
++                        }
++                    }
++                }
++                if( !path.empty() ) {
++                    reset_pathfinding_cd();
++                }
+             }
+ 
+             // Try to respect old paths, even if we can't pathfind at the moment
+diff --git a/src/monster.cpp b/src/monster.cpp
+index fa20c350bf79a..d057b386780a3 100644
+--- a/src/monster.cpp
++++ b/src/monster.cpp
+@@ -1335,6 +1335,9 @@ tripoint_abs_ms monster::get_dest() const
+ 
+ void monster::set_dest( const tripoint_abs_ms &p )
+ {
++    if( !goal || rl_dist( p, *goal ) > 2 ) {
++        reset_pathfinding_cd();
++    }
+     goal = p;
+ }
+ 
+@@ -2119,6 +2122,8 @@ void monster::apply_damage( Creature *source, bodypart_id /*bp*/, int dam,
+     if( is_dead_state() ) {
+         return;
+     }
++    // Ensure we can try to get at what hit us.
++    reset_pathfinding_cd();
+     hp -= dam;
+     if( hp < 1 ) {
+         set_killer( source );
+@@ -3913,9 +3918,9 @@ const pathfinding_settings &monster::get_pathfinding_settings() const
+     return type->path_settings;
+ }
+ 
+-std::set<tripoint> monster::get_path_avoid() const
++std::unordered_set<tripoint> monster::get_path_avoid() const
+ {
+-    std::set<tripoint> ret;
++    std::unordered_set<tripoint> ret;
+ 
+     map &here = get_map();
+     int radius = std::min( sight_range( here.ambient_light_at( pos() ) ), 5 );
+diff --git a/src/monster.h b/src/monster.h
+index e9aacfb31b872..9ce22b73e6559 100644
+--- a/src/monster.h
++++ b/src/monster.h
+@@ -607,7 +607,7 @@ class monster : public Creature
+         void on_load();
+ 
+         const pathfinding_settings &get_pathfinding_settings() const override;
+-        std::set<tripoint> get_path_avoid() const override;
++        std::unordered_set<tripoint> get_path_avoid() const override;
+     private:
+         void process_trigger( mon_trigger trig, int amount );
+         void process_trigger( mon_trigger trig, const std::function<int()> &amount_func );
+@@ -629,6 +629,23 @@ class monster : public Creature
+         monster_horde_attraction horde_attraction = MHA_NULL;
+         /** Found path. Note: Not used by monsters that don't pathfind! **/
+         std::vector<tripoint> path;
++
++        // Exponential backoff for stuck monsters. Massively reduces pathfinding CPU.
++        time_point pathfinding_cd = calendar::turn;
++        time_duration pathfinding_backoff = 2_seconds;
++
++        bool can_pathfind() const {
++            return pathfinding_cd <= calendar::turn;
++        }
++        void reset_pathfinding_cd() {
++            pathfinding_cd = calendar::turn;
++            pathfinding_backoff = 2_seconds;
++        }
++        void increment_pathfinding_cd() {
++            pathfinding_cd = calendar::turn + pathfinding_backoff;
++            pathfinding_backoff = std::min( pathfinding_backoff * 2, 10_seconds );
++        }
++
+         /** patrol points for monsters that can pathfind and have a patrol route! **/
+         std::vector<tripoint_abs_ms> patrol_route;
+         int next_patrol_point = -1;
+diff --git a/src/npc.cpp b/src/npc.cpp
+index 902fe99f79bd5..4f9ea923b70b1 100644
+--- a/src/npc.cpp
++++ b/src/npc.cpp
+@@ -3452,9 +3452,9 @@ const pathfinding_settings &npc::get_pathfinding_settings( bool no_bashing ) con
+     return *path_settings;
+ }
+ 
+-std::set<tripoint> npc::get_path_avoid() const
++std::unordered_set<tripoint> npc::get_path_avoid() const
+ {
+-    std::set<tripoint> ret;
++    std::unordered_set<tripoint> ret;
+     for( Creature &critter : g->all_creatures() ) {
+         // TODO: Cache this somewhere
+         ret.insert( critter.pos() );
+diff --git a/src/npc.h b/src/npc.h
+index 1e562ddeda778..759b92b647bce 100644
+--- a/src/npc.h
++++ b/src/npc.h
+@@ -1200,7 +1200,7 @@ class npc : public Character
+ 
+         const pathfinding_settings &get_pathfinding_settings() const override;
+         const pathfinding_settings &get_pathfinding_settings( bool no_bashing ) const;
+-        std::set<tripoint> get_path_avoid() const override;
++        std::unordered_set<tripoint> get_path_avoid() const override;
+ 
+         // Item discovery and fetching
+ 
+diff --git a/src/pathfinding.cpp b/src/pathfinding.cpp
+index b3bb4a14c79dc..58e58d4cf0759 100644
+--- a/src/pathfinding.cpp
++++ b/src/pathfinding.cpp
+@@ -27,7 +27,7 @@
+ #include "vehicle.h"
+ #include "vpart_position.h"
+ 
+-enum astar_state {
++enum astar_state : char {
+     ASL_NONE,
+     ASL_OPEN,
+     ASL_CLOSED
+@@ -42,30 +42,22 @@ static constexpr int flat_index( const point &p )
+ // Flattened 2D array representing a single z-level worth of pathfinding data
+ struct path_data_layer {
+     // State is accessed way more often than all other values here
+-    std::array< astar_state, MAPSIZE_X *MAPSIZE_Y > state;
++    std::bitset< MAPSIZE_X *MAPSIZE_Y > closed;
++    std::bitset< MAPSIZE_X *MAPSIZE_Y > open;
+     std::array< int, MAPSIZE_X *MAPSIZE_Y > score;
+     std::array< int, MAPSIZE_X *MAPSIZE_Y > gscore;
+     std::array< tripoint, MAPSIZE_X *MAPSIZE_Y > parent;
+ 
+-    void init( const point &min, const point &max ) {
+-        for( int x = min.x; x <= max.x; x++ ) {
+-            for( int y = min.y; y <= max.y; y++ ) {
+-                const int ind = flat_index( point( x, y ) );
+-                state[ind] = ASL_NONE; // Mark as unvisited
+-            }
+-        }
++    void reset() {
++        closed.reset();
++        open.reset();
+     }
+ };
+ 
+ struct pathfinder {
+-    point min;
+-    point max;
+-    pathfinder( const point &_min, const point &_max ) :
+-        min( _min ), max( _max ) {
+-    }
+-
+-    std::priority_queue< std::pair<int, tripoint>, std::vector< std::pair<int, tripoint> >, pair_greater_cmp_first >
+-    open;
++    using queue_type =
++        std::priority_queue< std::pair<int, tripoint>, std::vector< std::pair<int, tripoint> >, pair_greater_cmp_first >;
++    queue_type open;
+     std::array< std::unique_ptr< path_data_layer >, OVERMAP_LAYERS > path_data;
+ 
+     path_data_layer &get_layer( const int z ) {
+@@ -73,12 +65,20 @@ struct pathfinder {
+         if( ptr != nullptr ) {
+             return *ptr;
+         }
+-
+         ptr = std::make_unique<path_data_layer>();
+-        ptr->init( min, max );
+         return *ptr;
+     }
+ 
++    void reset( int minz, int maxz ) {
++        for( int i = minz; i <= maxz; ++i ) {
++            std::unique_ptr< path_data_layer > &ptr = path_data[i + OVERMAP_DEPTH];
++            if( ptr != nullptr ) {
++                path_data[i + OVERMAP_DEPTH]->reset();
++            }
++        }
++        open = queue_type();
++    }
++
+     bool empty() const {
+         return open.empty();
+     }
+@@ -92,12 +92,14 @@ struct pathfinder {
+     void add_point( const int gscore, const int score, const tripoint &from, const tripoint &to ) {
+         path_data_layer &layer = get_layer( to.z );
+         const int index = flat_index( to.xy() );
+-        if( ( layer.state[index] == ASL_OPEN && gscore >= layer.gscore[index] ) ||
+-            layer.state[index] == ASL_CLOSED ) {
++        if( layer.closed[index] ) {
++            return;
++        }
++        if( layer.open[index] && gscore > layer.gscore[index] ) {
+             return;
+         }
+ 
+-        layer.state [index] = ASL_OPEN;
++        layer.open[index] = true;
+         layer.gscore[index] = gscore;
+         layer.parent[index] = from;
+         layer.score [index] = score;
+@@ -107,16 +109,18 @@ struct pathfinder {
+     void close_point( const tripoint &p ) {
+         path_data_layer &layer = get_layer( p.z );
+         const int index = flat_index( p.xy() );
+-        layer.state[index] = ASL_CLOSED;
++        layer.closed[index] = true;
+     }
+ 
+     void unclose_point( const tripoint &p ) {
+         path_data_layer &layer = get_layer( p.z );
+         const int index = flat_index( p.xy() );
+-        layer.state[index] = ASL_NONE;
++        layer.closed[index] = false;
+     }
+ };
+ 
++pathfinder pf;
++
+ // Modifies `t` to point to a tile with `flag` in a 1-submap radius of `t`'s original value,
+ // searching nearest points first (starting with `t` itself).
+ // return false if it could not find a suitable point
+@@ -166,9 +170,34 @@ static bool is_disjoint( const Set1 &set1, const Set2 &set2 )
+     return true;
+ }
+ 
++std::vector<tripoint> map::straight_route( const tripoint &f, const tripoint &t ) const
++{
++    std::vector<tripoint> ret;
++    if( f == t || !inbounds( f ) ) {
++        return ret;
++    }
++    if( !inbounds( t ) ) {
++        tripoint clipped = t;
++        clip_to_bounds( clipped );
++        return straight_route( f, clipped );
++    }
++    static const pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
++    if( f.z == t.z ) {
++        ret = line_to( f, t );
++        const pathfinding_cache &pf_cache = get_pathfinding_cache_ref( f.z );
++        // Check all points for any special case (including just hard terrain)
++        if( std::any_of( ret.begin(), ret.end(), [&pf_cache]( const tripoint & p ) {
++        return pf_cache.special[p.x][p.y] & non_normal;
++        } ) ) {
++            ret.clear();
++        }
++    }
++    return ret;
++}
++
+ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                                   const pathfinding_settings &settings,
+-                                  const std::set<tripoint> &pre_closed ) const
++                                  const std::unordered_set<tripoint> &pre_closed ) const
+ {
+     /* TODO: If the origin or destination is out of bound, figure out the closest
+      * in-bounds point and go to that, then to the real origin/destination.
+@@ -186,17 +215,17 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+     }
+     // First, check for a simple straight line on flat ground
+     // Except when the line contains a pre-closed tile - we need to do regular pathing then
+-    static const pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
+     if( f.z == t.z ) {
+-        auto line_path = line_to( f, t );
+-        const pathfinding_cache &pf_cache = get_pathfinding_cache_ref( f.z );
+-        // Check all points for any special case (including just hard terrain)
+-        if( std::all_of( line_path.begin(), line_path.end(), [&pf_cache]( const tripoint & p ) {
+-        return !( pf_cache.special[p.x][p.y] & non_normal );
+-        } ) ) {
+-            const std::set<tripoint> sorted_line( line_path.begin(), line_path.end() );
+-
+-            if( is_disjoint( sorted_line, pre_closed ) ) {
++        auto line_path = straight_route( f, t );
++        if( !line_path.empty() ) {
++            bool bad = false;
++            for( const tripoint &p : line_path ) {
++                if( pre_closed.count( p ) ) {
++                    bad = true;
++                    break;
++                }
++            }
++            if( !bad ) {
+                 return line_path;
+             }
+         }
+@@ -222,7 +251,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+     clip_to_bounds( min.x, min.y, min.z );
+     clip_to_bounds( max.x, max.y, max.z );
+ 
+-    pathfinder pf( min.xy(), max.xy() );
++    pf.reset( min.z, max.z );
+     // Make NPCs not want to path through player
+     // But don't make player pathing stop working
+     for( const tripoint &p : pre_closed ) {
+@@ -238,13 +267,13 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+ 
+     bool done = false;
+ 
++    static const pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
+     do {
+         tripoint cur = pf.get_next();
+ 
+         const int parent_index = flat_index( cur.xy() );
+         path_data_layer &layer = pf.get_layer( cur.z );
+-        auto &cur_state = layer.state[parent_index];
+-        if( cur_state == ASL_CLOSED ) {
++        if( layer.closed[parent_index] ) {
+             continue;
+         }
+ 
+@@ -258,7 +287,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+             break;
+         }
+ 
+-        cur_state = ASL_CLOSED;
++        layer.closed[parent_index] = true;
+ 
+         const pathfinding_cache &pf_cache = get_pathfinding_cache_ref( cur.z );
+         const pf_special cur_special = pf_cache.special[cur.x][cur.y];
+@@ -277,7 +306,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                 continue;
+             }
+ 
+-            if( layer.state[index] == ASL_CLOSED ) {
++            if( layer.closed[index] ) {
+                 continue;
+             }
+ 
+@@ -291,7 +320,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                 newg += 2;
+             } else {
+                 if( roughavoid ) {
+-                    layer.state[index] = ASL_CLOSED; // Close all rough terrain tiles
++                    layer.closed[index] = true; // Close all rough terrain tiles
+                     continue;
+                 }
+ 
+@@ -309,7 +338,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+ 
+                 if( cost == 0 && rating <= 0 && ( !doors || !terrain.open || !furniture.open ) && veh == nullptr &&
+                     climb_cost <= 0 ) {
+-                    layer.state[index] = ASL_CLOSED; // Close it so that next time we won't try to calculate costs
++                    layer.closed[index] = true; // Close it so that next time we won't try to calculate costs
+                     continue;
+                 }
+ 
+@@ -342,7 +371,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                             int hp = veh->part( part ).hp();
+                             if( hp / 20 > bash ) {
+                                 // Threshold damage thing means we just can't bash this down
+-                                layer.state[index] = ASL_CLOSED;
++                                layer.closed[index] = true;
+                                 continue;
+                             } else if( hp / 10 > bash ) {
+                                 // Threshold damage thing means we will fail to deal damage pretty often
+@@ -354,7 +383,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                             const vehicle_part &vp = veh->part( part );
+                             if( !doors || !vp.info().has_flag( VPFLAG_OPENABLE ) ) {
+                                 // Won't be openable, don't try from other sides
+-                                layer.state[index] = ASL_CLOSED;
++                                layer.closed[index] = true;
+                             }
+ 
+                             continue;
+@@ -370,7 +399,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                         // Unbashable and unopenable from here
+                         if( !doors || !terrain.open || !furniture.open ) {
+                             // Or anywhere else for that matter
+-                            layer.state[index] = ASL_CLOSED;
++                            layer.closed[index] = true;
+                         }
+ 
+                         continue;
+@@ -397,7 +426,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                                 }
+ 
+                                 // Close p, because we won't be walking on it
+-                                layer.state[index] = ASL_CLOSED;
++                                layer.closed[index] = true;
+                                 continue;
+                             }
+                         } else {
+@@ -408,16 +437,12 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+                 }
+ 
+                 if( sharpavoid && p_special & PF_SHARP ) {
+-                    layer.state[index] = ASL_CLOSED; // Avoid sharp things
++                    layer.closed[index] = true; // Avoid sharp things
+                 }
+ 
+             }
+ 
+-            // If not visited, add as open
+-            // If visited, add it only if we can do so with better score
+-            if( layer.state[index] == ASL_NONE || newg < layer.gscore[index] ) {
+-                pf.add_point( newg, newg + 2 * rl_dist( p, t ), cur, p );
+-            }
++            pf.add_point( newg, newg + 2 * rl_dist( p, t ), cur, p );
+         }
+ 
+         if( !( cur_special & PF_UPDOWN ) || !settings.allow_climb_stairs ) {
+@@ -538,7 +563,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+ 
+ std::vector<tripoint_bub_ms> map::route( const tripoint_bub_ms &f, const tripoint_bub_ms &t,
+         const pathfinding_settings &settings,
+-        const std::set<tripoint> &pre_closed ) const
++        const std::unordered_set<tripoint> &pre_closed ) const
+ {
+     std::vector<tripoint> raw_result = route( f.raw(), t.raw(), settings, pre_closed );
+     std::vector<tripoint_bub_ms> result;
+diff --git a/src/pathfinding.h b/src/pathfinding.h
+index 50007c08e7030..b6b9bfee059cc 100644
+--- a/src/pathfinding.h
++++ b/src/pathfinding.h
+@@ -44,6 +44,7 @@ struct pathfinding_cache {
+     pathfinding_cache();
+ 
+     bool dirty = false;
++    std::unordered_set<point> dirty_points;
+ 
+     cata::mdarray<pf_special, point_bub_ms> special;
+ };
+
+From 2668f32e0264a32a9d27ddbf161030a8c83d430c Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Wed, 3 Jan 2024 22:17:59 -0700
+Subject: [PATCH 2/9] Remove the old enum.
+
+---
+ src/pathfinding.cpp | 8 +-------
+ 1 file changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/src/pathfinding.cpp b/src/pathfinding.cpp
+index 58e58d4cf0759..2cc5234e2ae4d 100644
+--- a/src/pathfinding.cpp
++++ b/src/pathfinding.cpp
+@@ -27,12 +27,6 @@
+ #include "vehicle.h"
+ #include "vpart_position.h"
+ 
+-enum astar_state : char {
+-    ASL_NONE,
+-    ASL_OPEN,
+-    ASL_CLOSED
+-};
+-
+ // Turns two indexed to a 2D array into an index to equivalent 1D array
+ static constexpr int flat_index( const point &p )
+ {
+@@ -41,7 +35,7 @@ static constexpr int flat_index( const point &p )
+ 
+ // Flattened 2D array representing a single z-level worth of pathfinding data
+ struct path_data_layer {
+-    // State is accessed way more often than all other values here
++    // Closed/open is accessed way more often than all other values here
+     std::bitset< MAPSIZE_X *MAPSIZE_Y > closed;
+     std::bitset< MAPSIZE_X *MAPSIZE_Y > open;
+     std::array< int, MAPSIZE_X *MAPSIZE_Y > score;
+
+From 4de77490bdf456b65bb4ea4608d7573e362dce2e Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Wed, 3 Jan 2024 23:08:47 -0700
+Subject: [PATCH 3/9] Correctly update cache when only single tiles are
+ changed.
+
+---
+ src/map.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 81893dcb2605b..d95d77e175439 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -10124,7 +10124,7 @@ const pathfinding_cache &map::get_pathfinding_cache_ref( int zlev ) const
+         return *pathfinding_caches[ OVERMAP_DEPTH ];
+     }
+     pathfinding_cache &cache = get_pathfinding_cache( zlev );
+-    if( cache.dirty ) {
++    if( cache.dirty || !cache.dirty_points.empty() ) {
+         update_pathfinding_cache( zlev );
+     }
+ 
+
+From dcecef96f1049134426a54b172d21549967e8a12 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Wed, 3 Jan 2024 23:32:11 -0700
+Subject: [PATCH 4/9] Clean up dirty points after updating cache.
+
+---
+ src/map.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index d95d77e175439..1bc4756134cff 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -10207,6 +10207,7 @@ void map::update_pathfinding_cache( int zlev ) const
+     for( const point &p : cache.dirty_points ) {
+         update_pathfinding_cache( { p, zlev} );
+     }
++    cache.dirty_points.clear();
+ }
+ 
+ void map::clip_to_bounds( tripoint &p ) const
+
+From 16464eb8861e66bdb19869705ecf415191ba33df Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Wed, 3 Jan 2024 23:34:05 -0700
+Subject: [PATCH 5/9] Rearrange logic in cache invalidation so same mistake
+ isn't repeated.
+
+---
+ src/map.cpp | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 1bc4756134cff..ab896a0052b3a 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -10201,11 +10201,10 @@ void map::update_pathfinding_cache( int zlev ) const
+             }
+         }
+         cache.dirty = false;
+-        cache.dirty_points.clear();
+-    }
+-
+-    for( const point &p : cache.dirty_points ) {
+-        update_pathfinding_cache( { p, zlev} );
++    } else {
++        for( const point &p : cache.dirty_points ) {
++            update_pathfinding_cache( { p, zlev } );
++        }
+     }
+     cache.dirty_points.clear();
+ }
+
+From e524b4de893f380d2b210c8674ce9168af3714b9 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Wed, 3 Jan 2024 23:58:17 -0700
+Subject: [PATCH 6/9] Correct condition to avoid sharp tiles.
+
+---
+ src/monmove.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/monmove.cpp b/src/monmove.cpp
+index 6c9abafdb68b9..e8da84577c4e5 100644
+--- a/src/monmove.cpp
++++ b/src/monmove.cpp
+@@ -282,7 +282,7 @@ bool monster::know_danger_at( const tripoint &p ) const
+             }
+ 
+             // Some things are only avoided if we're not attacking
+-            if( get_player_character().get_location() == get_dest() &&
++            if( get_player_character().get_location() != get_dest() ||
+                 attitude( &get_player_character() ) != MATT_ATTACK ) {
+                 // Sharp terrain is ignored while attacking
+                 if( avoid_sharp && here.has_flag( ter_furn_flag::TFLAG_SHARP, p ) &&
+
+From 2401ef8959d6976c32dac7ea0d9fc95af0007fb5 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Thu, 4 Jan 2024 11:26:02 -0700
+Subject: [PATCH 7/9] Cleanup + fix my clang-tidy errors.
+
+---
+ src/monmove.cpp     |  9 ++++-----
+ src/pathfinding.cpp | 17 ++++++-----------
+ 2 files changed, 10 insertions(+), 16 deletions(-)
+
+diff --git a/src/monmove.cpp b/src/monmove.cpp
+index e8da84577c4e5..8d493a57c6887 100644
+--- a/src/monmove.cpp
++++ b/src/monmove.cpp
+@@ -1078,11 +1078,10 @@ void monster::move()
+                     path = here.straight_route( pos(), local_dest );
+                     if( !path.empty() ) {
+                         std::unordered_set<tripoint> closed = get_path_avoid();
+-                        for( const tripoint &p : path ) {
+-                            if( closed.count( p ) ) {
+-                                path.clear();
+-                                break;
+-                            }
++                        if( std::any_of( path.begin(), path.end(), [&closed]( const tripoint & p ) {
++                        return closed.count( p );
++                        } ) ) {
++                            path.clear();
+                         }
+                     }
+                 }
+diff --git a/src/pathfinding.cpp b/src/pathfinding.cpp
+index 2cc5234e2ae4d..5c9bb6bb5da59 100644
+--- a/src/pathfinding.cpp
++++ b/src/pathfinding.cpp
+@@ -113,7 +113,7 @@ struct pathfinder {
+     }
+ };
+ 
+-pathfinder pf;
++static pathfinder pf;
+ 
+ // Modifies `t` to point to a tile with `flag` in a 1-submap radius of `t`'s original value,
+ // searching nearest points first (starting with `t` itself).
+@@ -175,7 +175,7 @@ std::vector<tripoint> map::straight_route( const tripoint &f, const tripoint &t
+         clip_to_bounds( clipped );
+         return straight_route( f, clipped );
+     }
+-    static const pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
++    constexpr pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
+     if( f.z == t.z ) {
+         ret = line_to( f, t );
+         const pathfinding_cache &pf_cache = get_pathfinding_cache_ref( f.z );
+@@ -212,14 +212,9 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+     if( f.z == t.z ) {
+         auto line_path = straight_route( f, t );
+         if( !line_path.empty() ) {
+-            bool bad = false;
+-            for( const tripoint &p : line_path ) {
+-                if( pre_closed.count( p ) ) {
+-                    bad = true;
+-                    break;
+-                }
+-            }
+-            if( !bad ) {
++            if( std::none_of( line_path.begin(), line_path.end(), [&pre_closed]( const tripoint & p ) {
++            return pre_closed.count( p );
++            } ) ) {
+                 return line_path;
+             }
+         }
+@@ -261,7 +256,7 @@ std::vector<tripoint> map::route( const tripoint &f, const tripoint &t,
+ 
+     bool done = false;
+ 
+-    static const pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
++    constexpr pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
+     do {
+         tripoint cur = pf.get_next();
+ 
+
+From 1cafa0a05dd91fe6b5e75a18ace97bda633793ed Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Thu, 4 Jan 2024 11:27:15 -0700
+Subject: [PATCH 8/9] Make the condition for adding an already open point more
+ restrictive.
+
+---
+ src/pathfinding.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/pathfinding.cpp b/src/pathfinding.cpp
+index 5c9bb6bb5da59..43d7d99df55b1 100644
+--- a/src/pathfinding.cpp
++++ b/src/pathfinding.cpp
+@@ -89,7 +89,7 @@ struct pathfinder {
+         if( layer.closed[index] ) {
+             return;
+         }
+-        if( layer.open[index] && gscore > layer.gscore[index] ) {
++        if( layer.open[index] && gscore >= layer.gscore[index] ) {
+             return;
+         }
+ 
+
+From 4805af91ee53d4fbe70eff21cb64f5daf98754ee Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Thu, 4 Jan 2024 11:52:54 -0700
+Subject: [PATCH 9/9] Move non_normal into lambda.
+
+---
+ src/pathfinding.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/pathfinding.cpp b/src/pathfinding.cpp
+index 43d7d99df55b1..30483b7465114 100644
+--- a/src/pathfinding.cpp
++++ b/src/pathfinding.cpp
+@@ -175,12 +175,12 @@ std::vector<tripoint> map::straight_route( const tripoint &f, const tripoint &t
+         clip_to_bounds( clipped );
+         return straight_route( f, clipped );
+     }
+-    constexpr pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
+     if( f.z == t.z ) {
+         ret = line_to( f, t );
+         const pathfinding_cache &pf_cache = get_pathfinding_cache_ref( f.z );
+         // Check all points for any special case (including just hard terrain)
+         if( std::any_of( ret.begin(), ret.end(), [&pf_cache]( const tripoint & p ) {
++        constexpr pf_special non_normal = PF_SLOW | PF_WALL | PF_VEHICLE | PF_TRAP | PF_SHARP;
+         return pf_cache.special[p.x][p.y] & non_normal;
+         } ) ) {
+             ret.clear();
