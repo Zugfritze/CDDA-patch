@@ -1,0 +1,1751 @@
+From b985681aa7c2c05df7fe568db83845439b88f231 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sat, 30 Dec 2023 19:00:30 -0700
+Subject: [PATCH 1/8] Remove the reachability cache, and replace the
+ `has_potential_los` implementation with one that uses the skew_vision_cache.
+
+---
+ src/action.cpp                    |   4 -
+ src/action.h                      |   2 -
+ src/cata_tiles.cpp                |  10 -
+ src/debug_menu.cpp                |   5 -
+ src/debug_menu.h                  |   1 -
+ src/game.cpp                      |  49 -----
+ src/game.h                        |   8 -
+ src/handle_action.cpp             |   7 -
+ src/level_cache.h                 |  11 --
+ src/map.cpp                       |  79 +++-----
+ src/map.h                         |   5 +-
+ src/reachability_cache.cpp        | 295 ------------------------------
+ src/reachability_cache.h          | 143 ---------------
+ tests/reachability_cache_test.cpp | 117 ------------
+ 14 files changed, 29 insertions(+), 707 deletions(-)
+ delete mode 100644 src/reachability_cache.cpp
+ delete mode 100644 src/reachability_cache.h
+ delete mode 100644 tests/reachability_cache_test.cpp
+
+diff --git a/src/action.cpp b/src/action.cpp
+index 0e505304814fb..c34920ff789be 100644
+--- a/src/action.cpp
++++ b/src/action.cpp
+@@ -341,8 +341,6 @@ std::string action_ident( action_id act )
+             return "debug_visibility";
+         case ACTION_DISPLAY_TRANSPARENCY:
+             return "debug_transparency";
+-        case ACTION_DISPLAY_REACHABILITY_ZONES:
+-            return "display_reachability_zones";
+         case ACTION_DISPLAY_LIGHTING:
+             return "debug_lighting";
+         case ACTION_DISPLAY_RADIATION:
+@@ -473,7 +471,6 @@ bool can_action_change_worldstate( const action_id act )
+         case ACTION_DISPLAY_RADIATION:
+         case ACTION_DISPLAY_NPC_ATTACK_POTENTIAL:
+         case ACTION_DISPLAY_TRANSPARENCY:
+-        case ACTION_DISPLAY_REACHABILITY_ZONES:
+         case ACTION_ZOOM_OUT:
+         case ACTION_ZOOM_IN:
+         case ACTION_TOGGLE_PIXEL_MINIMAP:
+@@ -928,7 +925,6 @@ action_id handle_action_menu()
+             REGISTER_ACTION( ACTION_DISPLAY_VISIBILITY );
+             REGISTER_ACTION( ACTION_DISPLAY_LIGHTING );
+             REGISTER_ACTION( ACTION_DISPLAY_TRANSPARENCY );
+-            REGISTER_ACTION( ACTION_DISPLAY_REACHABILITY_ZONES );
+             REGISTER_ACTION( ACTION_DISPLAY_RADIATION );
+             REGISTER_ACTION( ACTION_DISPLAY_NPC_ATTACK_POTENTIAL );
+             REGISTER_ACTION( ACTION_TOGGLE_DEBUG_MODE );
+diff --git a/src/action.h b/src/action.h
+index 76b50b45ed848..79ea9111d7c93 100644
+--- a/src/action.h
++++ b/src/action.h
+@@ -342,8 +342,6 @@ enum action_id : int {
+     ACTION_DISPLAY_TRANSPARENCY,
+     /** Toggle retracted/transparent high sprites */
+     ACTION_TOGGLE_PREVENT_OCCLUSION,
+-    /** Toggle reachability zones map */
+-    ACTION_DISPLAY_REACHABILITY_ZONES,
+     ACTION_DISPLAY_NPC_ATTACK_POTENTIAL,
+     /** Toggle timing of the game hours */
+     ACTION_TOGGLE_HOUR_TIMER,
+diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
+index c47788e82d6b7..277158af84888 100644
+--- a/src/cata_tiles.cpp
++++ b/src/cata_tiles.cpp
+@@ -1621,16 +1621,6 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+                                              ( ( tr - LIGHT_TRANSPARENCY_OPEN_AIR ) * 8 );
+                             draw_debug_tile( intensity, string_format( "%.2f", tr ) );
+                         }
+-
+-                        if( g->display_overlay_state( ACTION_DISPLAY_REACHABILITY_ZONES ) ) {
+-                            tripoint tile_pos( x, y, center.z );
+-                            int value = here.reachability_cache_value( tile_pos,
+-                                        g->debug_rz_display.r_cache_vertical, g->debug_rz_display.quadrant );
+-                            // use color to denote reachability from you to the target tile according to the
+-                            // cache
+-                            bool reachable = here.has_potential_los( you.pos(), tile_pos );
+-                            draw_debug_tile( reachable ? 0 : 6, std::to_string( value ) );
+-                        }
+                     }
+ 
+                     if( !invisible[0] ) {
+diff --git a/src/debug_menu.cpp b/src/debug_menu.cpp
+index 8da708197f467..3d066629491e0 100644
+--- a/src/debug_menu.cpp
++++ b/src/debug_menu.cpp
+@@ -233,7 +233,6 @@ std::string enum_to_string<debug_menu::debug_menu_index>( debug_menu::debug_menu
+         case debug_menu::debug_menu_index::DISPLAY_VISIBILITY: return "DISPLAY_VISIBILITY";
+         case debug_menu::debug_menu_index::DISPLAY_LIGHTING: return "DISPLAY_LIGHTING";
+         case debug_menu::debug_menu_index::DISPLAY_TRANSPARENCY: return "DISPLAY_TRANSPARENCY";
+-        case debug_menu::debug_menu_index::DISPLAY_REACHABILITY_ZONES: return "DISPLAY_REACHABILITY_ZONES";
+         case debug_menu::debug_menu_index::DISPLAY_RADIATION: return "DISPLAY_RADIATION";
+         case debug_menu::debug_menu_index::HOUR_TIMER: return "HOUR_TIMER";
+         case debug_menu::debug_menu_index::CHANGE_SPELLS: return "CHANGE_SPELLS";
+@@ -483,7 +482,6 @@ static int info_uilist( bool display_all_entries = true )
+             { uilist_entry( debug_menu_index::DISPLAY_VISIBILITY, true, 'v', _( "Toggle display visibility" ) ) },
+             { uilist_entry( debug_menu_index::DISPLAY_LIGHTING, true, 'l', _( "Toggle display lighting" ) ) },
+             { uilist_entry( debug_menu_index::DISPLAY_TRANSPARENCY, true, 'p', _( "Toggle display transparency" ) ) },
+-            { uilist_entry( debug_menu_index::DISPLAY_REACHABILITY_ZONES, true, 'z', _( "Toggle display reachability zones" ) ) },
+             { uilist_entry( debug_menu_index::DISPLAY_RADIATION, true, 'R', _( "Toggle display radiation" ) ) },
+             { uilist_entry( debug_menu_index::SHOW_MUT_CAT, true, 'm', _( "Show mutation category levels" ) ) },
+             { uilist_entry( debug_menu_index::BENCHMARK, true, 'b', _( "Draw benchmark (X seconds)" ) ) },
+@@ -3302,9 +3300,6 @@ void debug()
+         case debug_menu_index::DISPLAY_TRANSPARENCY:
+             g->display_toggle_overlay( ACTION_DISPLAY_TRANSPARENCY );
+             break;
+-        case debug_menu_index::DISPLAY_REACHABILITY_ZONES:
+-            g->display_reachability_zones();
+-            break;
+         case debug_menu_index::HOUR_TIMER:
+             g->toggle_debug_hour_timer();
+             break;
+diff --git a/src/debug_menu.h b/src/debug_menu.h
+index e6b5befcb5342..62cc350acdc75 100644
+--- a/src/debug_menu.h
++++ b/src/debug_menu.h
+@@ -81,7 +81,6 @@ enum class debug_menu_index : int {
+     DISPLAY_VISIBILITY,
+     DISPLAY_LIGHTING,
+     DISPLAY_TRANSPARENCY,
+-    DISPLAY_REACHABILITY_ZONES,
+     DISPLAY_RADIATION,
+     HOUR_TIMER,
+     CHANGE_SPELLS,
+diff --git a/src/game.cpp b/src/game.cpp
+index 195a4d99371a1..489f0c5714b95 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -7778,10 +7778,6 @@ look_around_result game::look_around(
+             if( !MAP_SHARING::isCompetitive() || MAP_SHARING::isDebugger() ) {
+                 display_transparency();
+             }
+-        } else if( action == "display_reachability_zones" ) {
+-            if( !MAP_SHARING::isCompetitive() || MAP_SHARING::isDebugger() ) {
+-                display_reachability_zones();
+-            }
+         } else if( action == "debug_radiation" ) {
+             if( !MAP_SHARING::isCompetitive() || MAP_SHARING::isDebugger() ) {
+                 display_radiation();
+@@ -12810,51 +12806,6 @@ void game::display_transparency()
+     }
+ }
+ 
+-// Debug menu: asks which reachability cache to display
+-void game::display_reachability_zones()
+-{
+-    if( use_tiles ) {
+-        display_toggle_overlay( ACTION_DISPLAY_REACHABILITY_ZONES );
+-        if( display_overlay_state( ACTION_DISPLAY_REACHABILITY_ZONES ) ) {
+-            const auto &menu_popup = [&]( int prev_value,
+-            const std::vector<std::string> &items ) -> std::optional<int> {
+-                uilist menu;
+-                int count = 0;
+-                for( const auto &menu_str : items )
+-                {
+-                    menu.addentry( count++, true, MENU_AUTOASSIGN, "%s", menu_str );
+-                }
+-                menu.selected = prev_value;
+-                menu.w_y_setup = 0;
+-                menu.query();
+-                if( menu.ret < 0 )
+-                {
+-                    return std::nullopt;
+-                }
+-                return menu.ret;
+-            };
+-            static_assert(
+-                static_cast<int>( enum_traits<reachability_cache_quadrant >::last ) == 3,
+-                "Debug menu expects at least 4 elements in the `quadrant` enum."
+-            );
+-            std::optional<int> cache =
+-                menu_popup( debug_rz_display.r_cache_vertical, { "Horizontal", "Vertical (upward)" } );
+-            std::optional<int> quadrant;
+-            if( cache ) {
+-                quadrant =
+-                    menu_popup( static_cast<int>( debug_rz_display.quadrant ),
+-                                /**/{ "NE", "SE", "SW", "NW" } );
+-            }
+-            if( cache && quadrant ) {
+-                debug_rz_display.r_cache_vertical = *cache;
+-                debug_rz_display.quadrant = static_cast<reachability_cache_quadrant>( *quadrant );
+-            } else { // user cancelled selection, toggle overlay off
+-                display_toggle_overlay( ACTION_DISPLAY_REACHABILITY_ZONES );
+-            }
+-        }
+-    }
+-}
+-
+ void game::init_autosave()
+ {
+     moves_since_last_save = 0;
+diff --git a/src/game.h b/src/game.h
+index 5c82e1abbb8bc..1778c3f83f181 100644
+--- a/src/game.h
++++ b/src/game.h
+@@ -1089,14 +1089,6 @@ class game
+         std::vector<effect_on_condition_id> inactive_global_effect_on_condition_vector;
+         queued_eocs queued_global_effect_on_conditions;
+ 
+-        // setting that specifies which reachability zone cache to display
+-        struct debug_reachability_zones_display {
+-            public:
+-                bool r_cache_vertical;
+-                reachability_cache_quadrant quadrant;
+-        } debug_rz_display = {}; // NOLINT(cata-serialize)
+-        void display_reachability_zones(); // Displays reachability zones
+-
+         spell_events &spell_events_subscriber();
+ 
+         pimpl<creature_tracker> critter_tracker;
+diff --git a/src/handle_action.cpp b/src/handle_action.cpp
+index 4d303deb35580..5e01224f53787 100644
+--- a/src/handle_action.cpp
++++ b/src/handle_action.cpp
+@@ -2895,13 +2895,6 @@ bool game::do_regular_action( action_id &act, avatar &player_character,
+             display_transparency();
+             break;
+ 
+-        case ACTION_DISPLAY_REACHABILITY_ZONES:
+-            if( MAP_SHARING::isCompetitive() && !MAP_SHARING::isDebugger() ) {
+-                break;    //don't do anything when sharing and not debugger
+-            }
+-            display_reachability_zones();
+-            break;
+-
+         case ACTION_TOGGLE_DEBUG_MODE:
+             if( MAP_SHARING::isCompetitive() && !MAP_SHARING::isDebugger() ) {
+                 break;    //don't do anything when sharing and not debugger
+diff --git a/src/level_cache.h b/src/level_cache.h
+index 427d41cac611e..9a49ac68f9ae7 100644
+--- a/src/level_cache.h
++++ b/src/level_cache.h
+@@ -11,7 +11,6 @@
+ #include "game_constants.h"
+ #include "lightmap.h"
+ #include "point.h"
+-#include "reachability_cache.h"
+ #include "shadowcasting.h"
+ #include "value_ptr.h"
+ 
+@@ -72,16 +71,6 @@ struct level_cache {
+         // effective "visibility_cache" is calculated as "max(seen_cache, camera_cache)"
+         cata::mdarray<float, point_bub_ms> camera_cache;
+ 
+-        // reachability caches
+-        // Note: indirection here is introduced, because caches are quite large:
+-        // at least (MAPSIZE_X * MAPSIZE_Y) * 4 bytes (≈69,696 bytes) each
+-        // so having them directly as part of the level_cache interferes with
+-        // CPU cache coherency of level_cache
+-        cata::value_ptr<reachability_cache_horizontal>r_hor_cache =
+-            cata::make_value<reachability_cache_horizontal>();
+-        cata::value_ptr<reachability_cache_vertical> r_up_cache =
+-            cata::make_value<reachability_cache_vertical>();
+-
+         // stores resulting apparent brightness to player, calculated by map::apparent_light_at
+         cata::mdarray<lit_level, point_bub_ms> visibility_cache;
+         std::bitset<MAPSIZE_X *MAPSIZE_Y> map_memory_cache_dec;
+diff --git a/src/map.cpp b/src/map.cpp
+index ef1c8ece37251..f7db18e7628d6 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -228,8 +228,6 @@ void map::set_transparency_cache_dirty( const int zlev )
+ {
+     if( inbounds_z( zlev ) ) {
+         get_cache( zlev ).transparency_cache_dirty.set();
+-        get_cache( zlev ).r_hor_cache->invalidate();
+-        get_cache( zlev ).r_up_cache->invalidate();
+     }
+ }
+ 
+@@ -239,8 +237,6 @@ void map::set_transparency_cache_dirty( const tripoint &p, bool field )
+         const tripoint smp = ms_to_sm_copy( p );
+         get_cache( smp.z ).transparency_cache_dirty.set( smp.x * MAPSIZE + smp.y );
+         if( !field ) {
+-            get_cache( smp.z ).r_hor_cache->invalidate( p.xy() );
+-            get_cache( smp.z ).r_up_cache->invalidate( p.xy() );
+             get_creature_tracker().invalidate_reachability_cache();
+         }
+     }
+@@ -7207,6 +7203,20 @@ bool map::sees( const tripoint &F, const tripoint &T, const int range ) const
+     return sees( F, T, range, dummy );
+ }
+ 
++point map::sees_cache_key( const tripoint &from, const tripoint &to ) const
++{
++
++    // Canonicalize the order of the tripoints so the cache is reflexive.
++    const tripoint &min = from < to ? from : to;
++    const tripoint &max = !( from < to ) ? from : to;
++
++    // A little gross, just pack the values into a point.
++    return point(
++               min.x << 16 | min.y << 8 | ( min.z + OVERMAP_DEPTH ),
++               max.x << 16 | max.y << 8 | ( max.z + OVERMAP_DEPTH )
++           );
++}
++
+ /**
+  * This one is internal-only, we don't want to expose the slope tweaking ickiness outside the map class.
+  **/
+@@ -7218,14 +7228,7 @@ bool map::sees( const tripoint &F, const tripoint &T, const int range,
+         bresenham_slope = 0;
+         return false; // Out of range!
+     }
+-    // Canonicalize the order of the tripoints so the cache is reflexive.
+-    const tripoint &min = F < T ? F : T;
+-    const tripoint &max = !( F < T ) ? F : T;
+-    // A little gross, just pack the values into a point.
+-    const point key(
+-        min.x << 16 | min.y << 8 | ( min.z + OVERMAP_DEPTH ),
+-        max.x << 16 | max.y << 8 | ( max.z + OVERMAP_DEPTH )
+-    );
++    const point key = sees_cache_key( F, T );
+     char cached = skew_vision_cache.get( key, -1 );
+     if( cached >= 0 ) {
+         return cached > 0;
+@@ -7374,12 +7377,14 @@ int map::ledge_coverage( const tripoint &viewer_p, const tripoint &target_p,
+         low_p = viewer_p;
+     }
+     tripoint ledge_p = high_p;
+-    for( tripoint p : line_to( tripoint( low_p.xy(), high_p.z ), high_p ) ) {
+-        if( dont_draw_lower_floor( p ) ) {
+-            ledge_p = p;
+-            break;
++    bresenham( tripoint( low_p.xy(), high_p.z ), high_p, 0, 0, [this,
++    &ledge_p]( const tripoint & new_point ) {
++        if( dont_draw_lower_floor( new_point ) ) {
++            ledge_p = new_point;
++            return false;
+         }
+-    }
++        return true;
++    } );
+ 
+     // Height of each z-level in grids
+     const float zlevel_to_grid_ratio = 2.0f;
+@@ -9365,7 +9370,7 @@ void map::build_map_cache( const int zlev, bool skip_lightmap )
+         bool floor_cache_was_dirty = build_floor_cache( z );
+         seen_cache_dirty |= floor_cache_was_dirty;
+         if( floor_cache_was_dirty && z > -OVERMAP_DEPTH ) {
+-            get_cache( z - 1 ).r_up_cache->invalidate();
++            //get_cache( z - 1 ).r_up_cache->invalidate();
+         }
+         seen_cache_dirty |= get_cache( z ).seen_cache_dirty;
+     }
+@@ -10259,40 +10264,12 @@ void map::invalidate_max_populated_zlev( int zlev )
+ bool map::has_potential_los( const tripoint &from, const tripoint &to,
+                              bool bounds_check ) const
+ {
+-    if( bounds_check && ( !inbounds( from ) || !inbounds( to ) ) ) {
+-        return false;
+-    }
+-    if( from.z == to.z ) {
+-        level_cache &cache = get_cache( from.z );
+-        return cache.r_hor_cache->has_potential_los( from.xy(), to.xy(), cache ) &&
+-               cache.r_hor_cache->has_potential_los( to.xy(), from.xy(), cache ) ;
+-    }
+-    tripoint upper;
+-    tripoint lower;
+-    std::tie( upper, lower ) = from.z > to.z ? std::make_pair( from, to ) : std::make_pair( to, from );
+-    // z-bounds depend on the invariant that both points are inbounds and their z are different
+-    return get_cache( lower.z ).r_up_cache->has_potential_los(
+-               lower.xy(), upper.xy(), get_cache( lower.z ), get_cache( lower.z + 1 ) );
+-}
+-
+-// Get cache value for debug purposes
+-int map::reachability_cache_value( const tripoint &p, bool vertical_cache,
+-                                   reachability_cache_quadrant quadrant ) const
+-{
+-    if( !inbounds( p ) ) {
+-        return -2;
+-    }
+-
+-    // rebuild caches, so valid values are shown
+-    has_potential_los( p, p ); // rebuild horizontal cache;
+-    has_potential_los( p, p + tripoint_above ); // rebuild "up" cache
+-
+-    const level_cache &lc = get_cache( p.z );
+-    if( vertical_cache ) {
+-        return lc.r_up_cache->get_value( quadrant, p.xy() );
+-    } else {
+-        return lc.r_hor_cache->get_value( quadrant, p.xy() );
++    const point key = sees_cache_key( from, to );
++    char cached = skew_vision_cache.get( key, -1 );
++    if( cached >= 0 ) {
++        return cached > 0;
+     }
++    return true;
+ }
+ 
+ static bool is_haulable( const item &it )
+diff --git a/src/map.h b/src/map.h
+index e95b9e013cd56..440e8420dc954 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -40,7 +40,6 @@
+ #include "mapdata.h"
+ #include "maptile_fwd.h"
+ #include "point.h"
+-#include "reachability_cache.h"
+ #include "rng.h"
+ #include "type_id.h"
+ #include "units.h"
+@@ -413,9 +412,6 @@ class map
+         bool has_potential_los( const tripoint &from, const tripoint &to,
+                                 bool bounds_check = true ) const;
+ 
+-        int reachability_cache_value( const tripoint &p, bool vertical_cache,
+-                                      reachability_cache_quadrant quadrant ) const;
+-
+         /**
+          * Callback invoked when a vehicle has moved.
+          */
+@@ -619,6 +615,7 @@ class map
+          * Set to zero if the function returns false.
+         **/
+         bool sees( const tripoint &F, const tripoint &T, int range, int &bresenham_slope ) const;
++        point sees_cache_key( const tripoint &from, const tripoint &to ) const;
+     public:
+         /**
+         * Returns coverage of target in relation to the observer. Target is loc2, observer is loc1.
+diff --git a/src/reachability_cache.cpp b/src/reachability_cache.cpp
+deleted file mode 100644
+index 6c06260b31cec..0000000000000
+--- a/src/reachability_cache.cpp
++++ /dev/null
+@@ -1,295 +0,0 @@
+-#include <algorithm>
+-#include <array>
+-#include <cstdlib>
+-#include <tuple>
+-
+-#include "cuboid_rectangle.h"
+-#include "level_cache.h"
+-#include "point.h"
+-#include "reachability_cache.h"
+-
+-//helper functions
+-static constexpr half_open_rectangle<point> bounding_rect( point_zero, {MAPSIZE_X, MAPSIZE_Y} );
+-
+-// needs to be explicitly defined to avoid linker errors
+-// see https://stackoverflow.com/questions/8452952/c-linker-error-with-class-static-constexpr
+-static constexpr int MAX_D = reachability_cache_layer::MAX_D;
+-
+-bool reachability_cache_layer::update( const point &p, reachability_cache_layer::ElType value )
+-{
+-    bool change = ( *this )[ p ] != value;
+-    ( *this )[ p ] = value;
+-    return change;
+-}
+-
+-inline reachability_cache_layer::ElType &reachability_cache_layer::operator[]( const point &p )
+-{
+-    return cache[p.x][p.y];
+-}
+-inline const reachability_cache_layer::ElType &reachability_cache_layer::operator[](
+-    const point &p ) const
+-{
+-    return cache[p.x][p.y];
+-}
+-
+-inline reachability_cache_layer::ElType
+-reachability_cache_layer::get_or( const point &p, reachability_cache_layer::ElType def ) const
+-{
+-    return bounding_rect.contains( p ) ? ( *this )[ p ] : def;
+-}
+-
+-template<bool Horizontal, typename... Types>
+-void reachability_cache<Horizontal, Types...>::invalidate()
+-{
+-    dirty_any = true;
+-    dirty.set();
+-}
+-
+-template<bool Horizontal, typename... Types>
+-void reachability_cache<Horizontal, Types...>::invalidate( const point &p )
+-{
+-    dirty_any = true;
+-    dirty[dirty_idx( p )] = true;
+-}
+-
+-template<bool Horizontal, typename... Types>
+-void reachability_cache<Horizontal, Types...>::rebuild( Q q,
+-        const Types &... params )
+-{
+-    static_assert( MAPSIZE_Y == SEEY * MAPSIZE, "reachability cache uses outdated map dimensions" );
+-    static_assert( MAPSIZE_X == SEEX * MAPSIZE, "reachability cache uses outdated map dimensions" );
+-
+-    // start is inclusive, end is exclusive (1 step outside of the range)
+-    point dir;
+-    point start;
+-    point end;
+-
+-    if( q == Q::SW || q == Q::NW ) {
+-        std::tie( dir.x, start.x, end.x ) = std::make_tuple( 1, 0, MAPSIZE_X );
+-    } else {
+-        std::tie( dir.x, start.x, end.x ) = std::make_tuple( -1, MAPSIZE_X - 1, -1 );
+-    }
+-    if( q == Q::NE || q == Q::NW ) {
+-        std::tie( dir.y, start.y, end.y ) = std::make_tuple( 1, 0, MAPSIZE_Y );
+-    } else {
+-        std::tie( dir.y, start.y, end.y ) = std::make_tuple( -1, MAPSIZE_Y - 1, -1 );
+-    }
+-
+-    point sm_dir = {dir.x * SEEX, dir.y * SEEY};
+-    reachability_cache_layer &layer = ( *this )[q];
+-    // submaps processing can mark adjacent submaps as "dirty", but that shouldn't affect other quadrants
+-    std::bitset<MAPSIZE *MAPSIZE> dirty_local;
+-
+-    // Traverse the submaps in order
+-    // smx and smy denote the "starting" corner or the submap (in map coords)
+-    for( int smx = start.x; smx != end.x; smx += sm_dir.x ) {
+-        int dirty_shift = ( smx / SEEX ) * MAPSIZE + ( start.y / SEEY );
+-        for( int smy = start.y; smy != end.y; smy += sm_dir.y ) {
+-            // if this submap is not marked as changed (externally or by neighbor submaps processing),
+-            // skip it
+-            if( !dirty[dirty_shift] && !dirty_local[dirty_shift] ) {
+-                dirty_shift += dir.y;
+-                continue;
+-            }
+-
+-            const point sm_p( smx, smy );
+-            point cur_sm_end = sm_p + sm_dir;
+-            bool last_change = false;
+-            bool next_x_dirty = false;
+-            bool next_y_dirty = false;
+-            int sm_last_x = cur_sm_end.x - dir.x;
+-            for( int x = smx; x != cur_sm_end.x; x += dir.x ) {
+-                for( int y = start.y; y != cur_sm_end.y; y += dir.y ) {
+-                    last_change = Spec::dynamic_fun( layer, {x, y}, dir, params ... );
+-                    next_x_dirty |= ( x == sm_last_x ) & last_change;
+-                }
+-                next_y_dirty |= last_change;
+-            }
+-
+-            // after the cycle, last_change holds the status of the "last corner" change,
+-            // it's the only thing that can affect dirty state of the diagonally adjacent submap.
+-            // Checking if diagonal neighbor is within bounds:
+-            if( last_change && smx + sm_dir.x != end.x  && smy + sm_dir.y != end.y ) {
+-                // can save some multiplications by reusing dirty_shift, but this way it's more readable
+-                dirty_local[dirty_idx( sm_p + sm_dir )] = true;
+-            }
+-            // "next" submap in y direction
+-            if( next_y_dirty && smy + sm_dir.y != end.y ) {
+-                dirty_local[dirty_idx( sm_p + point( 0, sm_dir.y ) )] = true;
+-            }
+-            // "next" submap in x direction
+-            if( next_x_dirty && smx + sm_dir.x != end.x ) {
+-                dirty_local[dirty_idx( sm_p + point( sm_dir.x, 0 ) )] = true;
+-            }
+-
+-            dirty_shift += dir.y;
+-        }
+-    }
+-
+-}
+-
+-template<bool Horizontal, typename... Types>
+-void reachability_cache<Horizontal, Types...>::rebuild( const Types &... params )
+-{
+-    for( int q = 0; q < enum_traits<Q>::size; q++ ) {
+-        rebuild( static_cast<Q>( q ), params... );
+-    }
+-}
+-
+-template<bool Horizontal, typename... Types>
+-int reachability_cache<Horizontal, Types...>::get_value( Q quad, const point &p ) const
+-{
+-    return ( *this )[ quad ][ p ];
+-}
+-
+-template<bool Horizontal, typename... Types>
+-inline reachability_cache_layer &reachability_cache<Horizontal, Types...>::operator[](
+-    const Q &quad )
+-{
+-    return layers[static_cast<int>( quad )];
+-}
+-
+-template<bool Horizontal, typename... Params>
+-inline const reachability_cache_layer &
+-reachability_cache<Horizontal, Params...>::operator[]( const reachability_cache::Q &quad ) const
+-{
+-    return layers[static_cast<int>( quad )];
+-}
+-
+-template<bool Horizontal, typename... Types>
+-bool reachability_cache<Horizontal, Types...>::has_potential_los(
+-    const point &from, const point &to, const Types &... params )
+-{
+-    if( dirty_any ) {
+-        if( Spec::source_cache_dirty( params ... ) ) {
+-            // this is specifically to fix the issue with the debug overlay
+-            // calling this method before transparency cache was rebuild after map shift
+-            return true;
+-        }
+-        rebuild( params ... );
+-        dirty.reset();
+-        dirty_any = false;
+-    }
+-
+-    point dp = to - from;
+-    int d = std::abs( dp.x ) + std::abs( dp.y );
+-
+-    bool south = to.y > from.y;
+-    bool west = to.x < from.x;
+-
+-    Q quad = enum_traits<Q>::quadrant( south, west );
+-    return Spec::test( d, ( *this )[quad][from] );
+-}
+-
+-template<bool Horizontal, typename... Params>
+-inline int reachability_cache<Horizontal, Params...>::dirty_idx( const point &p )
+-{
+-    return ( p.x / SEEX ) * MAPSIZE + p.y / SEEY;
+-}
+-
+-static bool transp( const level_cache &lc, const point &p )
+-{
+-    return lc.transparent_cache_wo_fields[p.x][p.y];
+-}
+-
+-static int max3( int arg,  int arg2, int arg3 )
+-{
+-    return std::max( std::max( arg, arg2 ), arg3 );
+-}
+-
+-static int min4( int arg,  int arg2, int arg3, int arg4 )
+-{
+-    return std::min( std::min( arg, arg2 ), std::min( arg3, arg4 ) );
+-}
+-
+-// DP function for the "horizontal" cache
+-// el = 0;  if not transparent, or else:
+-// el = max( horizontal_neighbor + 1, vertical_neighbor + 1, diagonal_neighbor + 2)
+-bool reachability_cache_specialization<true, level_cache>::dynamic_fun(
+-    reachability_cache_layer &layer, const point &p, const point &dir, const level_cache &this_lc )
+-{
+-    using Layer = reachability_cache_layer;
+-
+-    // if point is transparent, returns given prev_value, otherwise returns zero
+-    const auto transp_or_zero = [&]( const point & p, int prev_value ) {
+-        return prev_value != 0 && !transp( this_lc, p ) ? 0 : prev_value;
+-    };
+-
+-    const Layer::ElType v =
+-        std::min(
+-            MAX_D,
+-            max3(
+-                transp_or_zero( p - dir, layer.get_or( p - dir, 0 ) ) + 2,
+-                transp_or_zero( p - point( dir.x, 0 ), layer.get_or( p - point( dir.x, 0 ), 0 ) ) + 1,
+-                transp_or_zero( p - point( 0, dir.y ), layer.get_or( p - point( 0, dir.y ), 0 ) ) + 1
+-            ) );
+-
+-    return layer.update( p, v );
+-}
+-
+-// DP function for the "vertical" cache
+-// el = 0;  if this tile doesn't have floor/roof
+-// el = MAX_D; if tile is not transparent, else:
+-// el = min( horizontal_neighbor + 1, vertical_neighbor + 1, diagonal_neighbor + 2)
+-bool reachability_cache_specialization<false, level_cache, level_cache>::dynamic_fun(
+-    reachability_cache_layer &layer,
+-    const point &p, const point &dir,
+-    const level_cache &this_lc,
+-    const level_cache &floor_lc )
+-{
+-    using Layer = reachability_cache_layer;
+-
+-    if( !floor_lc.floor_cache[p.x][p.y] && transp( this_lc, p ) ) {
+-        return layer.update( p, 0 );
+-    }
+-
+-    const auto val_if_transp = [&]( const point & p, int prev_v ) {
+-        return prev_v >= MAX_D || !transp( this_lc, p ) ? MAX_D : prev_v;
+-    };
+-
+-    const Layer::ElType v =
+-        min4(
+-            MAX_D,
+-            val_if_transp( p - dir, layer.get_or( p - dir, MAX_D ) ) + 2,
+-            val_if_transp( p - point( dir.x, 0 ), layer.get_or( p - point( dir.x, 0 ), MAX_D ) ) + 1,
+-            val_if_transp( p - point( 0, dir.y ), layer.get_or( p - point( 0, dir.y ), MAX_D ) ) + 1
+-        );
+-
+-    return layer.update( p, v );
+-}
+-
+-// horizontal cache test
+-bool reachability_cache_specialization<true, level_cache>::test( int d, int cache_v )
+-{
+-    // for a transparent tile cache value is "1",
+-    // if tile has direct transparent neighbor, it's value will be "2"
+-    // d = |dx| + |dy| for such neighbor will be "1"
+-    // so if d equals or exceeds cache value, it's a "no"
+-    return d <= cache_v;
+-}
+-
+-bool reachability_cache_specialization<false, level_cache, level_cache>::source_cache_dirty(
+-    const level_cache &this_lc, const level_cache &floor_lc )
+-{
+-    return floor_lc.floor_cache_dirty || this_lc.transparency_cache_dirty.any();
+-}
+-
+-bool reachability_cache_specialization<true, level_cache>::source_cache_dirty(
+-    const level_cache &this_lc )
+-{
+-    return this_lc.transparency_cache_dirty.any();
+-}
+-
+-// vertical cache test
+-bool reachability_cache_specialization<false,  level_cache, level_cache>::test( int d,
+-        int cache_v )
+-{
+-    // cache value directly below the absent floor is 0
+-    // direct neighbor will have value of 1, distance is also 1
+-    // so only if d is strictly smaller than cache value (which is distance to open floor), it's a "no"
+-    return d < MAX_D && d >= cache_v;
+-}
+-
+-// avoid linker errors
+-template class reachability_cache<true, level_cache>;
+-template class reachability_cache<false, level_cache, level_cache>;
+diff --git a/src/reachability_cache.h b/src/reachability_cache.h
+deleted file mode 100644
+index 84f98699fb1e8..0000000000000
+--- a/src/reachability_cache.h
++++ /dev/null
+@@ -1,143 +0,0 @@
+-#pragma once
+-#ifndef CATA_SRC_REACHABILITY_CACHE_H
+-#define CATA_SRC_REACHABILITY_CACHE_H
+-
+-#include <bitset>
+-#include <cstdint>
+-#include <limits>
+-
+-#include "coordinates.h"
+-#include "enums.h"
+-#include "game_constants.h"
+-#include "mdarray.h"
+-
+-class reachability_cache_layer;
+-struct level_cache;
+-struct point;
+-
+-// Implementation note:
+-// Code could be somewhat simpler if virtual inheritance was used, but cache is a performance-critical structure
+-// so templates were used as an attempt to reduce the overhead of virtual method calls.
+-
+-template<bool Horizontal, typename ... Params>
+-struct reachability_cache_specialization {};
+-
+-// specialization for horizontal cache
+-template<>
+-struct reachability_cache_specialization<true, level_cache> {
+-
+-    static bool dynamic_fun( reachability_cache_layer &layer, const point &p,
+-                             const point &dir, const level_cache &this_lc );
+-
+-    // returns "false" if there is no LOS, "true" is "maybe there is LOS"
+-    static bool test( int d, int cache_v );
+-
+-    // returns true if transparency cache is still dirty
+-    static bool source_cache_dirty( const level_cache &this_lc );
+-};
+-
+-// specialization for vertical cache
+-template<>
+-struct reachability_cache_specialization<false, level_cache, level_cache> {
+-    static bool dynamic_fun( reachability_cache_layer &layer, const point &p,
+-                             const point &dir, const level_cache &this_lc, const level_cache &floor_lc );
+-
+-    // returns "false" if there is no LOS, "true" is "maybe there is LOS"
+-    static bool test( int d, int cache_v );
+-
+-    // returns true if transparency or floor cache is still dirty
+-    static bool source_cache_dirty( const level_cache &this_lc, const level_cache &floor_lc );
+-};
+-
+-class reachability_cache_layer
+-{
+-    public:
+-        using Q = reachability_cache_quadrant;
+-        using ElType = uint8_t;
+-        using QLayers = std::array<reachability_cache_layer, enum_traits<Q>::size>;
+-        // max distance the cache supports
+-        // all checks for distance that exceeds MAX_D will return "false"
+-        static constexpr int MAX_D = std::numeric_limits<ElType>::max() - 3;
+-    private:
+-        cata::mdarray<ElType, point_bub_ms> cache;
+-
+-        bool update( const point &p, ElType value );
+-        ElType &operator[]( const point &p );
+-        const ElType &operator[]( const point &p ) const;
+-        ElType get_or( const point &p, ElType def ) const;
+-
+-        template<bool Horizontal, typename ... Params>
+-        friend class reachability_cache;
+-        template<bool Horizontal, typename ... Params>
+-        friend struct reachability_cache_specialization;
+-};
+-
+-/**
+- *  This is DP-based cache/filter that can reject bresenham-based LOS checks in O(1) time.
+- *
+- *  Each tile stores 4 numbers (single byte each), representing the four quadrants,
+- *  each number is the maximal distance it's possible to reach from the "current" tile
+- *  into the corresponding quadrant, **using only two cardinal directions.**
+- *
+- *  I.e. for NW quadrant, two cardinal directions would be N and W,
+- *  and "tested" paths could only consist of N and W, i.e. N→N→N is a valid path of distance 3,
+- *  W→N→W→N is a valid path of distance 4.  W→N→N→E→N→N is an invalid path and is not considered.
+- *  (For the sake of diagonal transparency  N→W is considered a valid path if NW diagonal direction is valid).
+- *
+- *  It's easy to see that bresenham line starting from the "current tile" could only reach the "target tile",
+- *  if  there exists a path (that uses above rules) from "current tile" to the "target tile".
+- *  Bresenham line is a special case of such path.
+- *
+- *  The idea is to test the |dx| + |dy| distance between two points against stored maximal
+- *  "path distance" for the quadrant. If the stored maximal distance is less than the actual distance,
+- *  we know in advance that the result of bresenham will be negative.
+- *
+- * @tparam Horizontal  true if cache is horizontal (for points on the same z-level)
+- *                      false if cache is for inter-z-lev checks
+- * @tparam Params param list needed for cache building
+- */
+-template<bool Horizontal, typename ... Params>
+-class reachability_cache
+-{
+-    private:
+-        using Q = reachability_cache_layer::Q;
+-        using Spec = reachability_cache_specialization<Horizontal, Params...>;
+-        reachability_cache_layer::QLayers layers = {};
+-
+-        // fields:
+-        // marks parts of this cache is dirty (with reduced granularity)
+-        std::bitset<MAPSIZE *MAPSIZE> dirty;
+-        bool dirty_any = true;
+-
+-        // converts 2d coords into 1d dirty bitset coords
+-        static int dirty_idx( const point &p );
+-        void rebuild( Q quad, const Params &... params );
+-        void rebuild( const Params &... params );
+-        reachability_cache_layer &operator[]( const Q &quad );
+-        const reachability_cache_layer &operator[]( const Q &quad ) const;
+-
+-    public:
+-        reachability_cache() {
+-            dirty.set();
+-        }
+-
+-        void invalidate();
+-        void invalidate( const point &p );
+-        int get_value( Q q, const point &p ) const;
+-
+-        /**
+-         * For "horizontal" cache, param is a current level_cache.
+-         * For "vertical" cache, there are two params:
+-         *    first param is "current" level_cache, where transparency is checked;
+-         *
+-         *    second param is the "floor" level_cache,
+-         *    if second param is the same as "current" level cache, "down" direction is calculated,
+-         *    if second param points to the level cache above current, "upward" direction is calculated.
+-         */
+-        bool has_potential_los( const point &from, const point &to, const Params &... params );
+-};
+-
+-class reachability_cache_horizontal: public reachability_cache<true, level_cache> {};
+-class reachability_cache_vertical: public reachability_cache<false, level_cache, level_cache> {};
+-
+-#endif // CATA_SRC_REACHABILITY_CACHE_H
+diff --git a/tests/reachability_cache_test.cpp b/tests/reachability_cache_test.cpp
+deleted file mode 100644
+index 5defdf4293b09..0000000000000
+--- a/tests/reachability_cache_test.cpp
++++ /dev/null
+@@ -1,117 +0,0 @@
+-#include <functional>
+-#include <new>
+-#include <optional>
+-#include <ostream>
+-#include <utility>
+-#include <vector>
+-
+-#include "cached_options.h"
+-#include "cata_catch.h"
+-#include "cata_scope_helpers.h"
+-#include "map.h"
+-#include "map_helpers.h"
+-#include "map_iterator.h"
+-#include "map_test_case.h"
+-#include "mapdata.h"
+-#include "options_helpers.h"
+-#include "point.h"
+-
+-using namespace map_test_case_common;
+-using namespace map_test_case_common::tiles;
+-
+-static const ter_str_id ter_t_brick_wall( "t_brick_wall" );
+-static const ter_str_id ter_t_flat_roof( "t_flat_roof" );
+-
+-static const tile_predicate ter_set_flat_roof_above = ter_set( ter_t_flat_roof, tripoint_above );
+-
+-static const tile_predicate set_up_tiles_common =
+-    ifchar( '.', noop ) ||
+-    ifchar( 'X', noop ) ||
+-    ifchar( '#', ter_set( ter_t_brick_wall ) + ter_set_flat_roof_above ) ||
+-    ifchar( '^', ter_set_flat_roof_above ) ||
+-    fail;
+-
+-static void test_reachability( std::vector<std::string> setup, bool up )
+-{
+-    map_test_case t;
+-    t.setup = std::move( setup );
+-    t.expected_results = t.setup;
+-    t.anchor_char = 'X';
+-    t.anchor_map_pos = tripoint( 60, 60, 0 );
+-    t.validate_anchor_point( {60, 60, 0} );
+-    t.generate_transform_combinations();
+-
+-    map &here = get_map();
+-    clear_map();
+-    t.for_each_tile( set_up_tiles_common );
+-
+-    here.invalidate_map_cache( 0 );
+-    here.set_transparency_cache_dirty( 0 );
+-    here.build_map_cache( 0, true );
+-
+-    tripoint dst_shift = up ? tripoint_above : tripoint_zero;
+-    int rejected_cnt = 0;
+-
+-    for( const tripoint &src : here.points_in_radius( t.anchor_map_pos, 5 ) ) {
+-        for( const tripoint &dest : here.points_in_radius( t.anchor_map_pos + dst_shift, 5 ) ) {
+-            bool map_sees = here.sees( src, dest, 12 );
+-            bool r_cache_sees = here.has_potential_los( src, dest );
+-
+-            rejected_cnt += !r_cache_sees;
+-
+-            INFO( "F — from, T — to" );
+-            INFO( map_test_case_common::printers::format_2d_array(
+-            t.map_tiles_str( [&]( map_test_case::tile t, std::ostream & s ) {
+-                s << ( t.p.xy() == src.xy() ? 'F' : t.p.xy() == dest.xy() ? 'T' : t.setup_c );
+-            } ) ) );
+-            CAPTURE( src, dest, map_sees, r_cache_sees );
+-            // when map_sees==true, r_cache_sees should be true,
+-            // but when !map_sees, r_cache_sees is allowed be false or true
+-            CHECK( ( !map_sees || r_cache_sees ) );
+-        }
+-    }
+-
+-    // at least some lookups should be rejected by reachability cache
+-    CHECK( rejected_cnt > 100 );
+-}
+-
+-TEST_CASE( "reachability_horizontal", "[map][cache][vision][los][reachability]" )
+-{
+-    test_reachability( {{
+-            ".............", // NOLINT(cata-text-style)
+-            ".............", // NOLINT(cata-text-style)
+-            "...####......", // NOLINT(cata-text-style)
+-            "...#..#......", // NOLINT(cata-text-style)
+-            "...#..####...", // NOLINT(cata-text-style)
+-            "...#..X..#...", // NOLINT(cata-text-style)
+-            "...#.....#...", // NOLINT(cata-text-style)
+-            "...#..#..#...", // NOLINT(cata-text-style)
+-            "...#######...", // NOLINT(cata-text-style)
+-            ".............", // NOLINT(cata-text-style)
+-            "............." // NOLINT(cata-text-style)
+-        }
+-    }, /*up*/ false );
+-}
+-
+-TEST_CASE( "reachability_vertical", "[map][cache][vision][los][reachability]" )
+-{
+-    // vertical cache makes sense only for 3d vision
+-    restore_on_out_of_scope<bool> restore_fov_3d( fov_3d );
+-    override_option opt( "FOV_3D", "true" );
+-    fov_3d = true;
+-
+-    test_reachability( {{
+-            ".............", // NOLINT(cata-text-style)
+-            ".............", // NOLINT(cata-text-style)
+-            "...####......", // NOLINT(cata-text-style)
+-            "...#^^#......", // NOLINT(cata-text-style)
+-            "...#..####...", // NOLINT(cata-text-style)
+-            "...#..X..#...", // NOLINT(cata-text-style)
+-            "...#^^...#...", // NOLINT(cata-text-style)
+-            "...#^^#..#...", // NOLINT(cata-text-style)
+-            "...#######...", // NOLINT(cata-text-style)
+-            "...^^^.......", // NOLINT(cata-text-style)
+-            "............." // NOLINT(cata-text-style)
+-        }
+-    }, /*up*/ true );
+-}
+
+From b1c719e73365ecbdacf292189014f5dfb034f029 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sat, 30 Dec 2023 19:10:11 -0700
+Subject: [PATCH 2/8] Make the LRU cache actually an LRU cache.
+
+---
+ src/lru_cache.cpp | 77 -----------------------------------------------
+ src/lru_cache.h   | 74 +++++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 65 insertions(+), 86 deletions(-)
+ delete mode 100644 src/lru_cache.cpp
+
+diff --git a/src/lru_cache.cpp b/src/lru_cache.cpp
+deleted file mode 100644
+index 112eeaad841cc..0000000000000
+--- a/src/lru_cache.cpp
++++ /dev/null
+@@ -1,77 +0,0 @@
+-#include "lru_cache.h"
+-
+-#include <cstddef>
+-#include <sstream>
+-#include <iterator>
+-#include <memory>
+-#include <string>
+-
+-#include "memory_fast.h"
+-#include "point.h"
+-
+-template<typename Key, typename Value>
+-Value lru_cache<Key, Value>::get( const Key &pos, const Value &default_ ) const
+-{
+-    auto found = map.find( pos );
+-    if( found != map.end() ) {
+-        return found->second->second;
+-    }
+-    return default_;
+-}
+-
+-template<typename Key, typename Value>
+-void lru_cache<Key, Value>::remove( const Key &pos )
+-{
+-    auto found = map.find( pos );
+-    if( found != map.end() ) {
+-        ordered_list.erase( found->second );
+-        map.erase( found );
+-    }
+-}
+-
+-template<typename Key, typename Value>
+-void lru_cache<Key, Value>::insert( int limit, const Key &pos, const Value &t )
+-{
+-    auto found = map.find( pos );
+-
+-    if( found == map.end() ) {
+-        // Need new entry in map.  Make the new list entry and point to it.
+-        ordered_list.emplace_back( pos, t );
+-        map[pos] = std::prev( ordered_list.end() );
+-        trim( limit );
+-    } else {
+-        // Splice existing entry to the back.  Does not invalidate the
+-        // iterator, so no need to change the map.
+-        auto list_iterator = found->second;
+-        ordered_list.splice( ordered_list.end(), ordered_list, list_iterator );
+-        // Update the moved item
+-        list_iterator->second = t;
+-    }
+-}
+-
+-template<typename Key, typename Value>
+-void lru_cache<Key, Value>::trim( int limit )
+-{
+-    while( map.size() > static_cast<size_t>( limit ) ) {
+-        map.erase( ordered_list.front().first );
+-        ordered_list.pop_front();
+-    }
+-}
+-
+-template<typename Key, typename Value>
+-void lru_cache<Key, Value>::clear()
+-{
+-    map.clear();
+-    ordered_list.clear();
+-}
+-
+-template<typename Key, typename Value>
+-const std::list<typename lru_cache<Key, Value>::Pair> &lru_cache<Key, Value>::list() const
+-{
+-    return ordered_list;
+-}
+-
+-// explicit template initialization for lru_cache of all types
+-template class lru_cache<tripoint, int>;
+-template class lru_cache<point, char>;
+-template class lru_cache<std::string, shared_ptr_fast<std::istringstream>>;
+diff --git a/src/lru_cache.h b/src/lru_cache.h
+index 781e437189317..f081d10550e08 100644
+--- a/src/lru_cache.h
++++ b/src/lru_cache.h
+@@ -3,30 +3,86 @@
+ #define CATA_SRC_LRU_CACHE_H
+ 
+ #include <list>
+-#include <memory>
+-#include <string>
+ #include <unordered_map>
+ #include <utility>
+ 
+-#include "enums.h" // IWYU pragma: keep
+-#include "point.h"
+-
+ template<typename Key, typename Value>
+ class lru_cache
+ {
+     public:
+         using Pair = std::pair<Key, Value>;
+ 
+-        void insert( int limit, const Key &, const Value & );
+         Value get( const Key &, const Value &default_ ) const;
++        void insert( int limit, const Key &, const Value & );
+         void remove( const Key & );
+ 
+         void clear();
+-        const std::list<Pair> &list() const;
+-    private:
++    protected:
+         void trim( int limit );
+-        std::list<Pair> ordered_list;
++        void touch( typename std::list<Pair>::iterator iter ) const;
++        mutable std::list<Pair> ordered_list;
+         std::unordered_map<Key, typename std::list<Pair>::iterator> map;
+ };
+ 
++template<typename Key, typename Value>
++inline Value lru_cache<Key, Value>::get( const Key &pos, const Value &default_ ) const
++{
++    if( const auto found = this->map.find( pos ); found != this->map.end() ) {
++        const auto list_iter = found->second;
++        this->touch( list_iter );
++        return list_iter->second;
++    }
++    return default_;
++}
++
++template<typename Key, typename Value>
++inline void lru_cache<Key, Value>::remove( const Key &pos )
++{
++    if( const auto found = map.find( pos ); found != map.end() ) {
++        ordered_list.erase( found->second );
++        map.erase( found );
++    }
++}
++
++template<typename Key, typename Value>
++inline void lru_cache<Key, Value>::insert( int limit, const Key &pos, const Value &t )
++{
++    auto found = map.find( pos );
++    if( found == map.end() ) {
++        // Need new entry in map.  Make the new list entry and point to it.
++        ordered_list.emplace_back( pos, t );
++        map.emplace( pos, std::prev( ordered_list.end() ) );
++        trim( limit );
++    } else {
++        // Splice existing entry to the back.  Does not invalidate the
++        // iterator, so no need to change the map.
++        auto list_iterator = found->second;
++        touch( list_iterator );
++        // Update the moved item
++        list_iterator->second = t;
++    }
++}
++
++template<typename Key, typename Value>
++inline void lru_cache<Key, Value>::trim( int limit )
++{
++    while( map.size() > static_cast<size_t>( limit ) ) {
++        map.erase( ordered_list.front().first );
++        ordered_list.pop_front();
++    }
++}
++
++template<typename Key, typename Value>
++inline void lru_cache<Key, Value>::touch( typename std::list<Pair>::iterator iter ) const
++{
++    ordered_list.splice( ordered_list.end(), ordered_list, iter );
++}
++
++template<typename Key, typename Value>
++inline void lru_cache<Key, Value>::clear()
++{
++    map.clear();
++    ordered_list.clear();
++}
++
+ #endif // CATA_SRC_LRU_CACHE_H
+
+From 3a00de131e11ced373b41b5d37fbf7cc709b71fa Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sat, 30 Dec 2023 20:17:53 -0700
+Subject: [PATCH 3/8] Optimize sees by rearranging the order of predicates.
+
+---
+ src/creature.cpp | 122 +++++++++++++++++++++++++----------------------
+ 1 file changed, 65 insertions(+), 57 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index 9699620efb2ff..d42e08cc0d923 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -358,6 +358,10 @@ bool Creature::sees( const Creature &critter ) const
+         return true;
+     }
+ 
++    if( !fov_3d && posz() != critter.posz() ) {
++        return false;
++    }
++
+     map &here = get_map();
+ 
+     if( critter.has_flag( mon_flag_ALWAYS_VISIBLE ) || ( has_flag( mon_flag_ALWAYS_SEES_YOU ) &&
+@@ -371,20 +375,11 @@ bool Creature::sees( const Creature &critter ) const
+         return wanted_range < std::max( m->type->vision_day, m->type->vision_night );
+     }
+ 
+-    // player can use mirrors, so `has_potential_los` cannot be used
+-    if( !is_avatar() && !here.has_potential_los( pos(), critter.pos() ) ) {
+-        return false;
+-    }
+-
+     if( critter.is_hallucination() && !is_avatar() ) {
+         // hallucinations are imaginations of the player character, npcs or monsters don't hallucinate.
+         return false;
+     }
+ 
+-    if( !fov_3d && posz() != critter.posz() ) {
+-        return false;
+-    }
+-
+     // Creature has stumbled into an invisible player and is now aware of them
+     if( has_effect( effect_stumbled_into_invisible ) &&
+         here.has_field_at( critter.pos(), field_fd_last_known ) && critter.is_avatar() ) {
+@@ -400,31 +395,39 @@ bool Creature::sees( const Creature &critter ) const
+ 
+     // Can always see adjacent monsters on the same level.
+     // We also bypass lighting for vertically adjacent monsters, but still check for floors.
+-    if( wanted_range <= 1 && ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) ) {
+-        return visible( ch );
+-    } else if( ( wanted_range > 1 && critter.digging() &&
+-                 here.has_flag( ter_furn_flag::TFLAG_DIGGABLE, critter.pos() ) ) ||
+-               ( critter.has_flag( mon_flag_CAMOUFLAGE ) && wanted_range > this->get_eff_per() ) ||
+-               ( critter.has_flag( mon_flag_WATER_CAMOUFLAGE ) &&
+-                 wanted_range > this->get_eff_per() &&
+-                 ( critter.is_likely_underwater() ||
+-                   here.has_flag( ter_furn_flag::TFLAG_DEEP_WATER, critter.pos() ) ||
+-                   ( here.has_flag( ter_furn_flag::TFLAG_SHALLOW_WATER, critter.pos() ) &&
+-                     critter.get_size() < creature_size::medium ) ) ) ||
+-               ( critter.has_flag( mon_flag_NIGHT_INVISIBILITY ) &&
+-                 here.light_at( critter.pos() ) <= lit_level::LOW ) ||
+-               critter.has_effect( effect_invisibility ) ||
+-               ( !is_likely_underwater() && critter.is_likely_underwater() &&
+-                 majority_rule( critter.has_flag( mon_flag_WATER_CAMOUFLAGE ),
+-                                here.has_flag( ter_furn_flag::TFLAG_DEEP_WATER, critter.pos() ),
+-                                posz() != critter.posz() ) ) ||
+-               ( here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_HIDE_PLACE, critter.pos() ) &&
+-                 !( std::abs( posx() - critter.posx() ) <= 1 && std::abs( posy() - critter.posy() ) <= 1 &&
+-                    std::abs( posz() - critter.posz() ) <= 1 ) ) ||
+-               ( here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_SMALL_HIDE, critter.pos() ) &&
+-                 critter.has_flag( mon_flag_SMALL_HIDER ) &&
+-                 !( std::abs( posx() - critter.posx() ) <= 1 && std::abs( posy() - critter.posy() ) <= 1 &&
+-                    std::abs( posz() - critter.posz() ) <= 1 ) ) ) {
++    if( wanted_range <= 1 ) {
++        return ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) && visible( ch );
++    }
++
++    // If we cannot see without any of the penalties below, bail now.
++    const bool sees_unadjusted = sees( critter.pos(), critter.is_avatar() );
++    if( !sees_unadjusted ) {
++        return false;
++    }
++
++    if( ( wanted_range > 1 && critter.digging() &&
++          here.has_flag( ter_furn_flag::TFLAG_DIGGABLE, critter.pos() ) ) ||
++        ( critter.has_flag( mon_flag_CAMOUFLAGE ) && wanted_range > this->get_eff_per() ) ||
++        ( critter.has_flag( mon_flag_WATER_CAMOUFLAGE ) &&
++          wanted_range > this->get_eff_per() &&
++          ( critter.is_likely_underwater() ||
++            here.has_flag( ter_furn_flag::TFLAG_DEEP_WATER, critter.pos() ) ||
++            ( here.has_flag( ter_furn_flag::TFLAG_SHALLOW_WATER, critter.pos() ) &&
++              critter.get_size() < creature_size::medium ) ) ) ||
++        ( critter.has_flag( mon_flag_NIGHT_INVISIBILITY ) &&
++          here.light_at( critter.pos() ) <= lit_level::LOW ) ||
++        critter.has_effect( effect_invisibility ) ||
++        ( !is_likely_underwater() && critter.is_likely_underwater() &&
++          majority_rule( critter.has_flag( mon_flag_WATER_CAMOUFLAGE ),
++                         here.has_flag( ter_furn_flag::TFLAG_DEEP_WATER, critter.pos() ),
++                         posz() != critter.posz() ) ) ||
++        ( here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_HIDE_PLACE, critter.pos() ) &&
++          !( std::abs( posx() - critter.posx() ) <= 1 && std::abs( posy() - critter.posy() ) <= 1 &&
++             std::abs( posz() - critter.posz() ) <= 1 ) ) ||
++        ( here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_SMALL_HIDE, critter.pos() ) &&
++          critter.has_flag( mon_flag_SMALL_HIDER ) &&
++          !( std::abs( posx() - critter.posx() ) <= 1 && std::abs( posy() - critter.posy() ) <= 1 &&
++             std::abs( posz() - critter.posz() ) <= 1 ) ) ) {
+         return false;
+     }
+     if( ch != nullptr ) {
+@@ -432,7 +435,7 @@ bool Creature::sees( const Creature &critter ) const
+             const int coverage = std::max( here.obstacle_coverage( pos(), critter.pos() ),
+                                            here.ledge_coverage( *this, critter.pos() ) );
+             if( coverage < 30 ) {
+-                return sees( critter.pos(), critter.is_avatar() ) && visible( ch );
++                return visible( ch );
+             }
+             float size_modifier = 1.0f;
+             switch( ch->get_size() ) {
+@@ -464,12 +467,12 @@ bool Creature::sees( const Creature &critter ) const
+ 
+             if( coverage < profile ) {
+                 const int vision_modifier = std::max( 30 * ( 1 - coverage / profile ), 1 );
+-                return sees( critter.pos(), critter.is_avatar(), vision_modifier ) && visible( ch );
++                return vision_modifier >= wanted_range && visible( ch );
+             }
+             return false;
+         }
+     }
+-    return sees( critter.pos(), critter.is_avatar() ) && visible( ch );
++    return visible( ch );
+ }
+ 
+ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+@@ -479,32 +482,37 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+     }
+ 
+     map &here = get_map();
+-    const int range_cur = sight_range( here.ambient_light_at( t ) );
+-    const int range_day = sight_range( default_daylight_level() );
+-    const int range_night = sight_range( 0 );
+-    const int range_max = std::max( range_day, range_night );
+-    const int range_min = std::min( range_cur, range_max );
+-    const int wanted_range = rl_dist( pos(), t );
+-    if( wanted_range <= range_min ||
+-        ( wanted_range <= range_max &&
+-          here.ambient_light_at( t ) > here.get_cache_ref( t.z ).natural_light_level_cache ) ) {
+-        int range = 0;
+-        if( here.ambient_light_at( t ) > here.get_cache_ref( t.z ).natural_light_level_cache ) {
+-            range = MAX_VIEW_DISTANCE;
++
++    // player can use mirrors, so `has_potential_los` cannot be used
++    if( !this->is_avatar() && !here.has_potential_los( pos(), t ) ) {
++        return false;
++    }
++
++    const int target_range = rl_dist( pos(), t );
++    if( range_mod > 0 && range_mod < target_range ) {
++        return false;
++    }
++
++    int range = 0;
++    if( has_effect( effect_no_sight ) ) {
++        range = 1;
++    } else {
++        const float light_here = here.ambient_light_at( pos() );
++        const float light_there = here.ambient_light_at( t );
++        if( light_here > light_there ) {
++            // Looking at something from lighter area to darker area. Take the min.
++            range = std::min( sight_range( light_here ), sight_range( light_there ) );
+         } else {
+-            range = range_min;
+-        }
+-        if( has_effect( effect_no_sight ) ) {
+-            range = 1;
+-        }
+-        if( range_mod > 0 ) {
+-            range = std::min( range, range_mod );
++            // Looking at something from darker area to lighter area. Take the min.
++            range = std::max( sight_range( light_here ), sight_range( light_there ) );
+         }
++    }
++    if( range >= target_range ) {
+         if( is_avatar ) {
+             // Special case monster -> player visibility, forcing it to be symmetric with player vision.
+             const float player_visibility_factor = get_player_character().visibility() / 100.0f;
+             int adj_range = std::floor( range * player_visibility_factor );
+-            return adj_range >= wanted_range &&
++            return adj_range >= target_range &&
+                    here.get_cache_ref( pos().z ).seen_cache[pos().x][pos().y] > LIGHT_TRANSPARENCY_SOLID;
+         } else {
+             return here.sees( pos(), t, range );
+
+From 525dba21c0ca3f53448b29a7c193a53e1bff549d Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sat, 30 Dec 2023 21:07:03 -0700
+Subject: [PATCH 4/8] Fix some comments.
+
+---
+ src/creature.cpp | 2 +-
+ src/map.cpp      | 3 ---
+ 2 files changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index d42e08cc0d923..c15c00e43122e 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -503,7 +503,7 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+             // Looking at something from lighter area to darker area. Take the min.
+             range = std::min( sight_range( light_here ), sight_range( light_there ) );
+         } else {
+-            // Looking at something from darker area to lighter area. Take the min.
++            // Looking at something from darker area to lighter area. Take the max.
+             range = std::max( sight_range( light_here ), sight_range( light_there ) );
+         }
+     }
+diff --git a/src/map.cpp b/src/map.cpp
+index f7db18e7628d6..4c074e5864420 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -9369,9 +9369,6 @@ void map::build_map_cache( const int zlev, bool skip_lightmap )
+         build_transparency_cache( z );
+         bool floor_cache_was_dirty = build_floor_cache( z );
+         seen_cache_dirty |= floor_cache_was_dirty;
+-        if( floor_cache_was_dirty && z > -OVERMAP_DEPTH ) {
+-            //get_cache( z - 1 ).r_up_cache->invalidate();
+-        }
+         seen_cache_dirty |= get_cache( z ).seen_cache_dirty;
+     }
+     // needs a separate pass as it changes the caches on neighbour z-levels (e.g. floor_cache);
+
+From 037c1cd93417a8eecae343c080a3fe18acd993ca Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sat, 30 Dec 2023 23:23:57 -0700
+Subject: [PATCH 5/8] Additional optimizations to sees.
+
+---
+ src/creature.cpp | 35 ++++++++++++++++-------------------
+ src/line.h       | 14 ++++++++++++++
+ src/map.cpp      |  3 +--
+ src/map.h        |  3 +--
+ 4 files changed, 32 insertions(+), 23 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index c15c00e43122e..11f2f25651236 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -364,15 +364,19 @@ bool Creature::sees( const Creature &critter ) const
+ 
+     map &here = get_map();
+ 
++    const FastDistanceApproximation target_range = rl_dist_fast( pos(), critter.pos() );
++    if( target_range > MAX_VIEW_DISTANCE ) {
++        return false;
++    }
++
+     if( critter.has_flag( mon_flag_ALWAYS_VISIBLE ) || ( has_flag( mon_flag_ALWAYS_SEES_YOU ) &&
+             critter.is_avatar() ) ) {
+         return true;
+     }
+ 
+-    const int wanted_range = rl_dist( pos(), critter.pos() );
+     if( this->has_flag( mon_flag_ALL_SEEING ) ) {
+         const monster *m = this->as_monster();
+-        return wanted_range < std::max( m->type->vision_day, m->type->vision_night );
++        return target_range <= std::max( m->type->vision_day, m->type->vision_night );
+     }
+ 
+     if( critter.is_hallucination() && !is_avatar() ) {
+@@ -395,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+ 
+     // Can always see adjacent monsters on the same level.
+     // We also bypass lighting for vertically adjacent monsters, but still check for floors.
+-    if( wanted_range <= 1 ) {
++    if( target_range <= 1 ) {
+         return ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) && visible( ch );
+     }
+ 
+@@ -405,11 +409,11 @@ bool Creature::sees( const Creature &critter ) const
+         return false;
+     }
+ 
+-    if( ( wanted_range > 1 && critter.digging() &&
++    if( ( target_range > 2 && critter.digging() &&
+           here.has_flag( ter_furn_flag::TFLAG_DIGGABLE, critter.pos() ) ) ||
+-        ( critter.has_flag( mon_flag_CAMOUFLAGE ) && wanted_range > this->get_eff_per() ) ||
++        ( critter.has_flag( mon_flag_CAMOUFLAGE ) && target_range > this->get_eff_per() ) ||
+         ( critter.has_flag( mon_flag_WATER_CAMOUFLAGE ) &&
+-          wanted_range > this->get_eff_per() &&
++          target_range > this->get_eff_per() &&
+           ( critter.is_likely_underwater() ||
+             here.has_flag( ter_furn_flag::TFLAG_DEEP_WATER, critter.pos() ) ||
+             ( here.has_flag( ter_furn_flag::TFLAG_SHALLOW_WATER, critter.pos() ) &&
+@@ -467,7 +471,7 @@ bool Creature::sees( const Creature &critter ) const
+ 
+             if( coverage < profile ) {
+                 const int vision_modifier = std::max( 30 * ( 1 - coverage / profile ), 1 );
+-                return vision_modifier >= wanted_range && visible( ch );
++                return target_range <= vision_modifier && visible( ch );
+             }
+             return false;
+         }
+@@ -480,19 +484,12 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+     if( !fov_3d && posz() != t.z ) {
+         return false;
+     }
+-
+-    map &here = get_map();
+-
+-    // player can use mirrors, so `has_potential_los` cannot be used
+-    if( !this->is_avatar() && !here.has_potential_los( pos(), t ) ) {
+-        return false;
+-    }
+-
+-    const int target_range = rl_dist( pos(), t );
+-    if( range_mod > 0 && range_mod < target_range ) {
++    const FastDistanceApproximation target_range = rl_dist_fast( pos(), t );
++    if( range_mod > 0 && target_range > range_mod ) {
+         return false;
+     }
+ 
++    map &here = get_map();
+     int range = 0;
+     if( has_effect( effect_no_sight ) ) {
+         range = 1;
+@@ -507,12 +504,12 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+             range = std::max( sight_range( light_here ), sight_range( light_there ) );
+         }
+     }
+-    if( range >= target_range ) {
++    if( target_range <= range ) {
+         if( is_avatar ) {
+             // Special case monster -> player visibility, forcing it to be symmetric with player vision.
+             const float player_visibility_factor = get_player_character().visibility() / 100.0f;
+             int adj_range = std::floor( range * player_visibility_factor );
+-            return adj_range >= target_range &&
++            return target_range <= adj_range &&
+                    here.get_cache_ref( pos().z ).seen_cache[pos().x][pos().y] > LIGHT_TRANSPARENCY_SOLID;
+         } else {
+             return here.sees( pos(), t, range );
+diff --git a/src/line.h b/src/line.h
+index c9025dcb602be..b54b09ebb4ebc 100644
+--- a/src/line.h
++++ b/src/line.h
+@@ -214,6 +214,20 @@ struct FastDistanceApproximation {
+             }
+             return value >= rhs;
+         }
++        template<typename T>
++        inline bool operator<( const T &rhs ) const {
++            if( trigdist ) {
++                return value < rhs * rhs;
++            }
++            return value < rhs;
++        }
++        template<typename T>
++        inline bool operator>( const T &rhs ) const {
++            if( trigdist ) {
++                return value > rhs * rhs;
++            }
++            return value > rhs;
++        }
+         inline explicit operator int() const {
+             if( trigdist ) {
+                 return std::sqrt( value );
+diff --git a/src/map.cpp b/src/map.cpp
+index 4c074e5864420..a8abde6489145 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -10258,8 +10258,7 @@ void map::invalidate_max_populated_zlev( int zlev )
+     }
+ }
+ 
+-bool map::has_potential_los( const tripoint &from, const tripoint &to,
+-                             bool bounds_check ) const
++bool map::has_potential_los( const tripoint &from, const tripoint &to ) const
+ {
+     const point key = sees_cache_key( from, to );
+     char cached = skew_vision_cache.get( key, -1 );
+diff --git a/src/map.h b/src/map.h
+index 440e8420dc954..dd7e91c536bf5 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -409,8 +409,7 @@ class map
+          * true, if there might be a potential bresenham path between two points.
+          * false, if such path definitely not possible.
+          */
+-        bool has_potential_los( const tripoint &from, const tripoint &to,
+-                                bool bounds_check = true ) const;
++        bool has_potential_los( const tripoint &from, const tripoint &to ) const;
+ 
+         /**
+          * Callback invoked when a vehicle has moved.
+
+From 15c6c21784c346e2e1dce560e878e353f771e8b7 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 31 Dec 2023 00:51:37 -0700
+Subject: [PATCH 6/8] Fix bug with adjacent enemies due to rounding error.
+
+---
+ src/creature.cpp | 2 +-
+ src/line.h       | 3 +++
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index 11f2f25651236..5f260e5a6e490 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -399,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+ 
+     // Can always see adjacent monsters on the same level.
+     // We also bypass lighting for vertically adjacent monsters, but still check for floors.
+-    if( target_range <= 1 ) {
++    if( target_range.would_round_down_to_one() ) {
+         return ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) && visible( ch );
+     }
+ 
+diff --git a/src/line.h b/src/line.h
+index b54b09ebb4ebc..20bb04b56b86e 100644
+--- a/src/line.h
++++ b/src/line.h
+@@ -234,6 +234,9 @@ struct FastDistanceApproximation {
+             }
+             return value;
+         }
++        bool would_round_down_to_one() const {
++            return value <= 3;
++        }
+ };
+ 
+ inline FastDistanceApproximation trig_dist_fast( const tripoint &loc1, const tripoint &loc2 )
+
+From ab73ccf4139f0af12c160df67924478aa920d16c Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Sun, 31 Dec 2023 12:46:07 -0700
+Subject: [PATCH 7/8] Ensure adjacent monster checks would also work properly
+ for square distances.
+
+---
+ src/creature.cpp | 2 +-
+ src/line.h       | 7 +++++--
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index 5f260e5a6e490..4e857106b8a05 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -399,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+ 
+     // Can always see adjacent monsters on the same level.
+     // We also bypass lighting for vertically adjacent monsters, but still check for floors.
+-    if( target_range.would_round_down_to_one() ) {
++    if( target_range.would_round_down_to_one_or_zero() ) {
+         return ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) && visible( ch );
+     }
+ 
+diff --git a/src/line.h b/src/line.h
+index 20bb04b56b86e..236c4af78576e 100644
+--- a/src/line.h
++++ b/src/line.h
+@@ -234,8 +234,11 @@ struct FastDistanceApproximation {
+             }
+             return value;
+         }
+-        bool would_round_down_to_one() const {
+-            return value <= 3;
++        bool would_round_down_to_one_or_zero() const {
++            if( trigdist ) {
++                return value <= 3;
++            }
++            return value <= 1;
+         }
+ };
+ 
+
+From 58406b28d65685136e5efaa5f4fcfecf3cf3e0a0 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Mon, 1 Jan 2024 20:26:54 -0700
+Subject: [PATCH 8/8] Remove the fast dist approx changes. The behaviour near 0
+ is too bug prone.
+
+---
+ src/creature.cpp |  6 +++---
+ src/line.h       | 20 --------------------
+ 2 files changed, 3 insertions(+), 23 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index 4e857106b8a05..c142c7f2cae06 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -364,7 +364,7 @@ bool Creature::sees( const Creature &critter ) const
+ 
+     map &here = get_map();
+ 
+-    const FastDistanceApproximation target_range = rl_dist_fast( pos(), critter.pos() );
++    const int target_range = rl_dist( pos(), critter.pos() );
+     if( target_range > MAX_VIEW_DISTANCE ) {
+         return false;
+     }
+@@ -399,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+ 
+     // Can always see adjacent monsters on the same level.
+     // We also bypass lighting for vertically adjacent monsters, but still check for floors.
+-    if( target_range.would_round_down_to_one_or_zero() ) {
++    if( target_range <= 1 ) {
+         return ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) && visible( ch );
+     }
+ 
+@@ -484,7 +484,7 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+     if( !fov_3d && posz() != t.z ) {
+         return false;
+     }
+-    const FastDistanceApproximation target_range = rl_dist_fast( pos(), t );
++    const int target_range = rl_dist( pos(), t );
+     if( range_mod > 0 && target_range > range_mod ) {
+         return false;
+     }
+diff --git a/src/line.h b/src/line.h
+index 236c4af78576e..c9025dcb602be 100644
+--- a/src/line.h
++++ b/src/line.h
+@@ -214,32 +214,12 @@ struct FastDistanceApproximation {
+             }
+             return value >= rhs;
+         }
+-        template<typename T>
+-        inline bool operator<( const T &rhs ) const {
+-            if( trigdist ) {
+-                return value < rhs * rhs;
+-            }
+-            return value < rhs;
+-        }
+-        template<typename T>
+-        inline bool operator>( const T &rhs ) const {
+-            if( trigdist ) {
+-                return value > rhs * rhs;
+-            }
+-            return value > rhs;
+-        }
+         inline explicit operator int() const {
+             if( trigdist ) {
+                 return std::sqrt( value );
+             }
+             return value;
+         }
+-        bool would_round_down_to_one_or_zero() const {
+-            if( trigdist ) {
+-                return value <= 3;
+-            }
+-            return value <= 1;
+-        }
+ };
+ 
+ inline FastDistanceApproximation trig_dist_fast( const tripoint &loc1, const tripoint &loc2 )
