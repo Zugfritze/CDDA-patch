@@ -1,7 +1,7 @@
-From b985681aa7c2c05df7fe568db83845439b88f231 Mon Sep 17 00:00:00 2001
+From 8c5175f72d91ef148ec0d206c5c67183e68a090f Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Sat, 30 Dec 2023 19:00:30 -0700
-Subject: [PATCH 1/8] Remove the reachability cache, and replace the
+Subject: [PATCH 01/11] Remove the reachability cache, and replace the
  `has_potential_los` implementation with one that uses the skew_vision_cache.
 
 ---
@@ -67,10 +67,10 @@ index 76b50b45ed848..79ea9111d7c93 100644
      /** Toggle timing of the game hours */
      ACTION_TOGGLE_HOUR_TIMER,
 diff --git a/src/cata_tiles.cpp b/src/cata_tiles.cpp
-index c47788e82d6b7..277158af84888 100644
+index 3af027f5b16b5..80f2d73d8e6ca 100644
 --- a/src/cata_tiles.cpp
 +++ b/src/cata_tiles.cpp
-@@ -1621,16 +1621,6 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
+@@ -1620,16 +1620,6 @@ void cata_tiles::draw( const point &dest, const tripoint &center, int width, int
                                               ( ( tr - LIGHT_TRANSPARENCY_OPEN_AIR ) * 8 );
                              draw_debug_tile( intensity, string_format( "%.2f", tr ) );
                          }
@@ -130,10 +130,10 @@ index e6b5befcb5342..62cc350acdc75 100644
      HOUR_TIMER,
      CHANGE_SPELLS,
 diff --git a/src/game.cpp b/src/game.cpp
-index 195a4d99371a1..489f0c5714b95 100644
+index a8fdda7e78e25..74e73c1bb1fa9 100644
 --- a/src/game.cpp
 +++ b/src/game.cpp
-@@ -7778,10 +7778,6 @@ look_around_result game::look_around(
+@@ -7776,10 +7776,6 @@ look_around_result game::look_around(
              if( !MAP_SHARING::isCompetitive() || MAP_SHARING::isDebugger() ) {
                  display_transparency();
              }
@@ -144,7 +144,7 @@ index 195a4d99371a1..489f0c5714b95 100644
          } else if( action == "debug_radiation" ) {
              if( !MAP_SHARING::isCompetitive() || MAP_SHARING::isDebugger() ) {
                  display_radiation();
-@@ -12810,51 +12806,6 @@ void game::display_transparency()
+@@ -12808,51 +12804,6 @@ void game::display_transparency()
      }
  }
  
@@ -197,10 +197,10 @@ index 195a4d99371a1..489f0c5714b95 100644
  {
      moves_since_last_save = 0;
 diff --git a/src/game.h b/src/game.h
-index 5c82e1abbb8bc..1778c3f83f181 100644
+index c25584ec7b1e6..794f7a919491b 100644
 --- a/src/game.h
 +++ b/src/game.h
-@@ -1089,14 +1089,6 @@ class game
+@@ -1091,14 +1091,6 @@ class game
          std::vector<effect_on_condition_id> inactive_global_effect_on_condition_vector;
          queued_eocs queued_global_effect_on_conditions;
  
@@ -216,10 +216,10 @@ index 5c82e1abbb8bc..1778c3f83f181 100644
  
          pimpl<creature_tracker> critter_tracker;
 diff --git a/src/handle_action.cpp b/src/handle_action.cpp
-index 4d303deb35580..5e01224f53787 100644
+index 4581ee10882c7..8fb63dd13bacc 100644
 --- a/src/handle_action.cpp
 +++ b/src/handle_action.cpp
-@@ -2895,13 +2895,6 @@ bool game::do_regular_action( action_id &act, avatar &player_character,
+@@ -2893,13 +2893,6 @@ bool game::do_regular_action( action_id &act, avatar &player_character,
              display_transparency();
              break;
  
@@ -263,10 +263,10 @@ index 427d41cac611e..9a49ac68f9ae7 100644
          cata::mdarray<lit_level, point_bub_ms> visibility_cache;
          std::bitset<MAPSIZE_X *MAPSIZE_Y> map_memory_cache_dec;
 diff --git a/src/map.cpp b/src/map.cpp
-index ef1c8ece37251..f7db18e7628d6 100644
+index ab896a0052b3a..cf5f2648a8c67 100644
 --- a/src/map.cpp
 +++ b/src/map.cpp
-@@ -228,8 +228,6 @@ void map::set_transparency_cache_dirty( const int zlev )
+@@ -227,8 +227,6 @@ void map::set_transparency_cache_dirty( const int zlev )
  {
      if( inbounds_z( zlev ) ) {
          get_cache( zlev ).transparency_cache_dirty.set();
@@ -275,7 +275,7 @@ index ef1c8ece37251..f7db18e7628d6 100644
      }
  }
  
-@@ -239,8 +237,6 @@ void map::set_transparency_cache_dirty( const tripoint &p, bool field )
+@@ -238,8 +236,6 @@ void map::set_transparency_cache_dirty( const tripoint &p, bool field )
          const tripoint smp = ms_to_sm_copy( p );
          get_cache( smp.z ).transparency_cache_dirty.set( smp.x * MAPSIZE + smp.y );
          if( !field ) {
@@ -284,7 +284,7 @@ index ef1c8ece37251..f7db18e7628d6 100644
              get_creature_tracker().invalidate_reachability_cache();
          }
      }
-@@ -7207,6 +7203,20 @@ bool map::sees( const tripoint &F, const tripoint &T, const int range ) const
+@@ -7206,6 +7202,20 @@ bool map::sees( const tripoint &F, const tripoint &T, const int range ) const
      return sees( F, T, range, dummy );
  }
  
@@ -305,7 +305,7 @@ index ef1c8ece37251..f7db18e7628d6 100644
  /**
   * This one is internal-only, we don't want to expose the slope tweaking ickiness outside the map class.
   **/
-@@ -7218,14 +7228,7 @@ bool map::sees( const tripoint &F, const tripoint &T, const int range,
+@@ -7217,14 +7227,7 @@ bool map::sees( const tripoint &F, const tripoint &T, const int range,
          bresenham_slope = 0;
          return false; // Out of range!
      }
@@ -321,7 +321,7 @@ index ef1c8ece37251..f7db18e7628d6 100644
      char cached = skew_vision_cache.get( key, -1 );
      if( cached >= 0 ) {
          return cached > 0;
-@@ -7374,12 +7377,14 @@ int map::ledge_coverage( const tripoint &viewer_p, const tripoint &target_p,
+@@ -7373,12 +7376,14 @@ int map::ledge_coverage( const tripoint &viewer_p, const tripoint &target_p,
          low_p = viewer_p;
      }
      tripoint ledge_p = high_p;
@@ -341,7 +341,7 @@ index ef1c8ece37251..f7db18e7628d6 100644
  
      // Height of each z-level in grids
      const float zlevel_to_grid_ratio = 2.0f;
-@@ -9365,7 +9370,7 @@ void map::build_map_cache( const int zlev, bool skip_lightmap )
+@@ -9364,7 +9369,7 @@ void map::build_map_cache( const int zlev, bool skip_lightmap )
          bool floor_cache_was_dirty = build_floor_cache( z );
          seen_cache_dirty |= floor_cache_was_dirty;
          if( floor_cache_was_dirty && z > -OVERMAP_DEPTH ) {
@@ -350,7 +350,7 @@ index ef1c8ece37251..f7db18e7628d6 100644
          }
          seen_cache_dirty |= get_cache( z ).seen_cache_dirty;
      }
-@@ -10259,40 +10264,12 @@ void map::invalidate_max_populated_zlev( int zlev )
+@@ -10317,40 +10322,12 @@ void map::invalidate_max_populated_zlev( int zlev )
  bool map::has_potential_los( const tripoint &from, const tripoint &to,
                               bool bounds_check ) const
  {
@@ -397,7 +397,7 @@ index ef1c8ece37251..f7db18e7628d6 100644
  
  static bool is_haulable( const item &it )
 diff --git a/src/map.h b/src/map.h
-index e95b9e013cd56..440e8420dc954 100644
+index c79e469e464ab..7481f068633fc 100644
 --- a/src/map.h
 +++ b/src/map.h
 @@ -40,7 +40,6 @@
@@ -408,7 +408,7 @@ index e95b9e013cd56..440e8420dc954 100644
  #include "rng.h"
  #include "type_id.h"
  #include "units.h"
-@@ -413,9 +412,6 @@ class map
+@@ -414,9 +413,6 @@ class map
          bool has_potential_los( const tripoint &from, const tripoint &to,
                                  bool bounds_check = true ) const;
  
@@ -418,7 +418,7 @@ index e95b9e013cd56..440e8420dc954 100644
          /**
           * Callback invoked when a vehicle has moved.
           */
-@@ -619,6 +615,7 @@ class map
+@@ -620,6 +616,7 @@ class map
           * Set to zero if the function returns false.
          **/
          bool sees( const tripoint &F, const tripoint &T, int range, int &bresenham_slope ) const;
@@ -1000,10 +1000,10 @@ index 5defdf4293b09..0000000000000
 -    }, /*up*/ true );
 -}
 
-From b1c719e73365ecbdacf292189014f5dfb034f029 Mon Sep 17 00:00:00 2001
+From 7203e424369a517e2696f8c584522ed068360ee0 Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Sat, 30 Dec 2023 19:10:11 -0700
-Subject: [PATCH 2/8] Make the LRU cache actually an LRU cache.
+Subject: [PATCH 02/11] Make the LRU cache actually an LRU cache.
 
 ---
  src/lru_cache.cpp | 77 -----------------------------------------------
@@ -1195,20 +1195,20 @@ index 781e437189317..f081d10550e08 100644
 +
  #endif // CATA_SRC_LRU_CACHE_H
 
-From 3a00de131e11ced373b41b5d37fbf7cc709b71fa Mon Sep 17 00:00:00 2001
+From 3d73e6f3228e87e2ba8caf14a3f754140347ebc5 Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Sat, 30 Dec 2023 20:17:53 -0700
-Subject: [PATCH 3/8] Optimize sees by rearranging the order of predicates.
+Subject: [PATCH 03/11] Optimize sees by rearranging the order of predicates.
 
 ---
- src/creature.cpp | 122 +++++++++++++++++++++++++----------------------
- 1 file changed, 65 insertions(+), 57 deletions(-)
+ src/creature.cpp | 118 ++++++++++++++++++++++++++---------------------
+ 1 file changed, 65 insertions(+), 53 deletions(-)
 
 diff --git a/src/creature.cpp b/src/creature.cpp
-index 9699620efb2ff..d42e08cc0d923 100644
+index 2859c4e8c5663..26248a27ea839 100644
 --- a/src/creature.cpp
 +++ b/src/creature.cpp
-@@ -358,6 +358,10 @@ bool Creature::sees( const Creature &critter ) const
+@@ -348,6 +348,10 @@ bool Creature::sees( const Creature &critter ) const
          return true;
      }
  
@@ -1219,7 +1219,7 @@ index 9699620efb2ff..d42e08cc0d923 100644
      map &here = get_map();
  
      if( critter.has_flag( mon_flag_ALWAYS_VISIBLE ) || ( has_flag( mon_flag_ALWAYS_SEES_YOU ) &&
-@@ -371,20 +375,11 @@ bool Creature::sees( const Creature &critter ) const
+@@ -361,11 +365,6 @@ bool Creature::sees( const Creature &critter ) const
          return wanted_range < std::max( m->type->vision_day, m->type->vision_night );
      }
  
@@ -1231,16 +1231,7 @@ index 9699620efb2ff..d42e08cc0d923 100644
      if( critter.is_hallucination() && !is_avatar() ) {
          // hallucinations are imaginations of the player character, npcs or monsters don't hallucinate.
          return false;
-     }
- 
--    if( !fov_3d && posz() != critter.posz() ) {
--        return false;
--    }
--
-     // Creature has stumbled into an invisible player and is now aware of them
-     if( has_effect( effect_stumbled_into_invisible ) &&
-         here.has_field_at( critter.pos(), field_fd_last_known ) && critter.is_avatar() ) {
-@@ -400,31 +395,39 @@ bool Creature::sees( const Creature &critter ) const
+@@ -395,31 +394,39 @@ bool Creature::sees( const Creature &critter ) const
  
      // Can always see adjacent monsters on the same level.
      // We also bypass lighting for vertically adjacent monsters, but still check for floors.
@@ -1305,7 +1296,7 @@ index 9699620efb2ff..d42e08cc0d923 100644
          return false;
      }
      if( ch != nullptr ) {
-@@ -432,7 +435,7 @@ bool Creature::sees( const Creature &critter ) const
+@@ -427,7 +434,7 @@ bool Creature::sees( const Creature &critter ) const
              const int coverage = std::max( here.obstacle_coverage( pos(), critter.pos() ),
                                             here.ledge_coverage( *this, critter.pos() ) );
              if( coverage < 30 ) {
@@ -1314,7 +1305,7 @@ index 9699620efb2ff..d42e08cc0d923 100644
              }
              float size_modifier = 1.0f;
              switch( ch->get_size() ) {
-@@ -464,12 +467,12 @@ bool Creature::sees( const Creature &critter ) const
+@@ -459,12 +466,12 @@ bool Creature::sees( const Creature &critter ) const
  
              if( coverage < profile ) {
                  const int vision_modifier = std::max( 30 * ( 1 - coverage / profile ), 1 );
@@ -1329,7 +1320,7 @@ index 9699620efb2ff..d42e08cc0d923 100644
  }
  
  bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
-@@ -479,32 +482,37 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+@@ -474,32 +481,37 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
      }
  
      map &here = get_map();
@@ -1388,10 +1379,10 @@ index 9699620efb2ff..d42e08cc0d923 100644
          } else {
              return here.sees( pos(), t, range );
 
-From 525dba21c0ca3f53448b29a7c193a53e1bff549d Mon Sep 17 00:00:00 2001
+From 3c7348175cbc6feceb66812152630665d695ffac Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Sat, 30 Dec 2023 21:07:03 -0700
-Subject: [PATCH 4/8] Fix some comments.
+Subject: [PATCH 04/11] Fix some comments.
 
 ---
  src/creature.cpp | 2 +-
@@ -1399,10 +1390,10 @@ Subject: [PATCH 4/8] Fix some comments.
  2 files changed, 1 insertion(+), 4 deletions(-)
 
 diff --git a/src/creature.cpp b/src/creature.cpp
-index d42e08cc0d923..c15c00e43122e 100644
+index 26248a27ea839..aca6797fccbb8 100644
 --- a/src/creature.cpp
 +++ b/src/creature.cpp
-@@ -503,7 +503,7 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+@@ -502,7 +502,7 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
              // Looking at something from lighter area to darker area. Take the min.
              range = std::min( sight_range( light_here ), sight_range( light_there ) );
          } else {
@@ -1412,10 +1403,10 @@ index d42e08cc0d923..c15c00e43122e 100644
          }
      }
 diff --git a/src/map.cpp b/src/map.cpp
-index f7db18e7628d6..4c074e5864420 100644
+index cf5f2648a8c67..9414161416a30 100644
 --- a/src/map.cpp
 +++ b/src/map.cpp
-@@ -9369,9 +9369,6 @@ void map::build_map_cache( const int zlev, bool skip_lightmap )
+@@ -9368,9 +9368,6 @@ void map::build_map_cache( const int zlev, bool skip_lightmap )
          build_transparency_cache( z );
          bool floor_cache_was_dirty = build_floor_cache( z );
          seen_cache_dirty |= floor_cache_was_dirty;
@@ -1426,10 +1417,10 @@ index f7db18e7628d6..4c074e5864420 100644
      }
      // needs a separate pass as it changes the caches on neighbour z-levels (e.g. floor_cache);
 
-From 037c1cd93417a8eecae343c080a3fe18acd993ca Mon Sep 17 00:00:00 2001
+From 8013277d79b70077ec07685ab58c4d10b02787bb Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Sat, 30 Dec 2023 23:23:57 -0700
-Subject: [PATCH 5/8] Additional optimizations to sees.
+Subject: [PATCH 05/11] Additional optimizations to sees.
 
 ---
  src/creature.cpp | 35 ++++++++++++++++-------------------
@@ -1439,10 +1430,10 @@ Subject: [PATCH 5/8] Additional optimizations to sees.
  4 files changed, 32 insertions(+), 23 deletions(-)
 
 diff --git a/src/creature.cpp b/src/creature.cpp
-index c15c00e43122e..11f2f25651236 100644
+index aca6797fccbb8..9f720d0457d9d 100644
 --- a/src/creature.cpp
 +++ b/src/creature.cpp
-@@ -364,15 +364,19 @@ bool Creature::sees( const Creature &critter ) const
+@@ -354,15 +354,19 @@ bool Creature::sees( const Creature &critter ) const
  
      map &here = get_map();
  
@@ -1464,7 +1455,7 @@ index c15c00e43122e..11f2f25651236 100644
      }
  
      if( critter.is_hallucination() && !is_avatar() ) {
-@@ -395,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+@@ -394,7 +398,7 @@ bool Creature::sees( const Creature &critter ) const
  
      // Can always see adjacent monsters on the same level.
      // We also bypass lighting for vertically adjacent monsters, but still check for floors.
@@ -1473,7 +1464,7 @@ index c15c00e43122e..11f2f25651236 100644
          return ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) && visible( ch );
      }
  
-@@ -405,11 +409,11 @@ bool Creature::sees( const Creature &critter ) const
+@@ -404,11 +408,11 @@ bool Creature::sees( const Creature &critter ) const
          return false;
      }
  
@@ -1488,7 +1479,7 @@ index c15c00e43122e..11f2f25651236 100644
            ( critter.is_likely_underwater() ||
              here.has_flag( ter_furn_flag::TFLAG_DEEP_WATER, critter.pos() ) ||
              ( here.has_flag( ter_furn_flag::TFLAG_SHALLOW_WATER, critter.pos() ) &&
-@@ -467,7 +471,7 @@ bool Creature::sees( const Creature &critter ) const
+@@ -466,7 +470,7 @@ bool Creature::sees( const Creature &critter ) const
  
              if( coverage < profile ) {
                  const int vision_modifier = std::max( 30 * ( 1 - coverage / profile ), 1 );
@@ -1497,7 +1488,7 @@ index c15c00e43122e..11f2f25651236 100644
              }
              return false;
          }
-@@ -480,19 +484,12 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+@@ -479,19 +483,12 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
      if( !fov_3d && posz() != t.z ) {
          return false;
      }
@@ -1520,7 +1511,7 @@ index c15c00e43122e..11f2f25651236 100644
      int range = 0;
      if( has_effect( effect_no_sight ) ) {
          range = 1;
-@@ -507,12 +504,12 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+@@ -506,12 +503,12 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
              range = std::max( sight_range( light_here ), sight_range( light_there ) );
          }
      }
@@ -1561,10 +1552,10 @@ index c9025dcb602be..b54b09ebb4ebc 100644
              if( trigdist ) {
                  return std::sqrt( value );
 diff --git a/src/map.cpp b/src/map.cpp
-index 4c074e5864420..a8abde6489145 100644
+index 9414161416a30..daba8460f51b6 100644
 --- a/src/map.cpp
 +++ b/src/map.cpp
-@@ -10258,8 +10258,7 @@ void map::invalidate_max_populated_zlev( int zlev )
+@@ -10316,8 +10316,7 @@ void map::invalidate_max_populated_zlev( int zlev )
      }
  }
  
@@ -1575,10 +1566,10 @@ index 4c074e5864420..a8abde6489145 100644
      const point key = sees_cache_key( from, to );
      char cached = skew_vision_cache.get( key, -1 );
 diff --git a/src/map.h b/src/map.h
-index 440e8420dc954..dd7e91c536bf5 100644
+index 7481f068633fc..a482a08631433 100644
 --- a/src/map.h
 +++ b/src/map.h
-@@ -409,8 +409,7 @@ class map
+@@ -410,8 +410,7 @@ class map
           * true, if there might be a potential bresenham path between two points.
           * false, if such path definitely not possible.
           */
@@ -1589,10 +1580,10 @@ index 440e8420dc954..dd7e91c536bf5 100644
          /**
           * Callback invoked when a vehicle has moved.
 
-From 15c6c21784c346e2e1dce560e878e353f771e8b7 Mon Sep 17 00:00:00 2001
+From 5a3340631d48ccc8c2dfe707e5a82d3022ada18d Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Sun, 31 Dec 2023 00:51:37 -0700
-Subject: [PATCH 6/8] Fix bug with adjacent enemies due to rounding error.
+Subject: [PATCH 06/11] Fix bug with adjacent enemies due to rounding error.
 
 ---
  src/creature.cpp | 2 +-
@@ -1600,10 +1591,10 @@ Subject: [PATCH 6/8] Fix bug with adjacent enemies due to rounding error.
  2 files changed, 4 insertions(+), 1 deletion(-)
 
 diff --git a/src/creature.cpp b/src/creature.cpp
-index 11f2f25651236..5f260e5a6e490 100644
+index 9f720d0457d9d..ee750bdc1ead6 100644
 --- a/src/creature.cpp
 +++ b/src/creature.cpp
-@@ -399,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+@@ -398,7 +398,7 @@ bool Creature::sees( const Creature &critter ) const
  
      // Can always see adjacent monsters on the same level.
      // We also bypass lighting for vertically adjacent monsters, but still check for floors.
@@ -1627,10 +1618,10 @@ index b54b09ebb4ebc..20bb04b56b86e 100644
  
  inline FastDistanceApproximation trig_dist_fast( const tripoint &loc1, const tripoint &loc2 )
 
-From ab73ccf4139f0af12c160df67924478aa920d16c Mon Sep 17 00:00:00 2001
+From 2a6fd4f202db3fe05a8a8c5928d2bbeb6fdf0855 Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Sun, 31 Dec 2023 12:46:07 -0700
-Subject: [PATCH 7/8] Ensure adjacent monster checks would also work properly
+Subject: [PATCH 07/11] Ensure adjacent monster checks would also work properly
  for square distances.
 
 ---
@@ -1639,10 +1630,10 @@ Subject: [PATCH 7/8] Ensure adjacent monster checks would also work properly
  2 files changed, 6 insertions(+), 3 deletions(-)
 
 diff --git a/src/creature.cpp b/src/creature.cpp
-index 5f260e5a6e490..4e857106b8a05 100644
+index ee750bdc1ead6..ae714dc3e4bb4 100644
 --- a/src/creature.cpp
 +++ b/src/creature.cpp
-@@ -399,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+@@ -398,7 +398,7 @@ bool Creature::sees( const Creature &critter ) const
  
      // Can always see adjacent monsters on the same level.
      // We also bypass lighting for vertically adjacent monsters, but still check for floors.
@@ -1670,11 +1661,11 @@ index 20bb04b56b86e..236c4af78576e 100644
  };
  
 
-From 58406b28d65685136e5efaa5f4fcfecf3cf3e0a0 Mon Sep 17 00:00:00 2001
+From ddea06b8f29df5621520bcfbe6835181208b4347 Mon Sep 17 00:00:00 2001
 From: prharvey <2677507+prharvey@users.noreply.github.com>
 Date: Mon, 1 Jan 2024 20:26:54 -0700
-Subject: [PATCH 8/8] Remove the fast dist approx changes. The behaviour near 0
- is too bug prone.
+Subject: [PATCH 08/11] Remove the fast dist approx changes. The behaviour near
+ 0 is too bug prone.
 
 ---
  src/creature.cpp |  6 +++---
@@ -1682,10 +1673,10 @@ Subject: [PATCH 8/8] Remove the fast dist approx changes. The behaviour near 0
  2 files changed, 3 insertions(+), 23 deletions(-)
 
 diff --git a/src/creature.cpp b/src/creature.cpp
-index 4e857106b8a05..c142c7f2cae06 100644
+index ae714dc3e4bb4..b9f372a0d13e9 100644
 --- a/src/creature.cpp
 +++ b/src/creature.cpp
-@@ -364,7 +364,7 @@ bool Creature::sees( const Creature &critter ) const
+@@ -354,7 +354,7 @@ bool Creature::sees( const Creature &critter ) const
  
      map &here = get_map();
  
@@ -1694,7 +1685,7 @@ index 4e857106b8a05..c142c7f2cae06 100644
      if( target_range > MAX_VIEW_DISTANCE ) {
          return false;
      }
-@@ -399,7 +399,7 @@ bool Creature::sees( const Creature &critter ) const
+@@ -398,7 +398,7 @@ bool Creature::sees( const Creature &critter ) const
  
      // Can always see adjacent monsters on the same level.
      // We also bypass lighting for vertically adjacent monsters, but still check for floors.
@@ -1703,7 +1694,7 @@ index 4e857106b8a05..c142c7f2cae06 100644
          return ( posz() == critter.posz() || here.sees( pos(), critter.pos(), 1 ) ) && visible( ch );
      }
  
-@@ -484,7 +484,7 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+@@ -483,7 +483,7 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
      if( !fov_3d && posz() != t.z ) {
          return false;
      }
@@ -1749,3 +1740,145 @@ index 236c4af78576e..c9025dcb602be 100644
  };
  
  inline FastDistanceApproximation trig_dist_fast( const tripoint &loc1, const tripoint &loc2 )
+
+From 6cbd2437cfdd3192f80454b0b546b5bf4a4c212a Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Fri, 5 Jan 2024 12:20:57 -0700
+Subject: [PATCH 09/11] Revert changes to creature light level logic. Will PR
+ separately.
+
+---
+ src/creature.cpp | 41 +++++++++++++++++++++--------------------
+ 1 file changed, 21 insertions(+), 20 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index b9f372a0d13e9..41c891b488ffe 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -403,8 +403,7 @@ bool Creature::sees( const Creature &critter ) const
+     }
+ 
+     // If we cannot see without any of the penalties below, bail now.
+-    const bool sees_unadjusted = sees( critter.pos(), critter.is_avatar() );
+-    if( !sees_unadjusted ) {
++    if( !sees( critter.pos(), critter.is_avatar() ) ) {
+         return false;
+     }
+ 
+@@ -483,32 +482,34 @@ bool Creature::sees( const tripoint &t, bool is_avatar, int range_mod ) const
+     if( !fov_3d && posz() != t.z ) {
+         return false;
+     }
+-    const int target_range = rl_dist( pos(), t );
+-    if( range_mod > 0 && target_range > range_mod ) {
+-        return false;
+-    }
+ 
+     map &here = get_map();
+-    int range = 0;
+-    if( has_effect( effect_no_sight ) ) {
+-        range = 1;
+-    } else {
+-        const float light_here = here.ambient_light_at( pos() );
+-        const float light_there = here.ambient_light_at( t );
+-        if( light_here > light_there ) {
+-            // Looking at something from lighter area to darker area. Take the min.
+-            range = std::min( sight_range( light_here ), sight_range( light_there ) );
++    const int range_cur = sight_range( here.ambient_light_at( t ) );
++    const int range_day = sight_range( default_daylight_level() );
++    const int range_night = sight_range( 0 );
++    const int range_max = std::max( range_day, range_night );
++    const int range_min = std::min( range_cur, range_max );
++    const int wanted_range = rl_dist( pos(), t );
++    if( wanted_range <= range_min ||
++        ( wanted_range <= range_max &&
++          here.ambient_light_at( t ) > here.get_cache_ref( t.z ).natural_light_level_cache ) ) {
++        int range = 0;
++        if( here.ambient_light_at( t ) > here.get_cache_ref( t.z ).natural_light_level_cache ) {
++            range = MAX_VIEW_DISTANCE;
+         } else {
+-            // Looking at something from darker area to lighter area. Take the max.
+-            range = std::max( sight_range( light_here ), sight_range( light_there ) );
++            range = range_min;
++        }
++        if( has_effect( effect_no_sight ) ) {
++            range = 1;
++        }
++        if( range_mod > 0 ) {
++            range = std::min( range, range_mod );
+         }
+-    }
+-    if( target_range <= range ) {
+         if( is_avatar ) {
+             // Special case monster -> player visibility, forcing it to be symmetric with player vision.
+             const float player_visibility_factor = get_player_character().visibility() / 100.0f;
+             int adj_range = std::floor( range * player_visibility_factor );
+-            return target_range <= adj_range &&
++            return adj_range >= wanted_range &&
+                    here.get_cache_ref( pos().z ).seen_cache[pos().x][pos().y] > LIGHT_TRANSPARENCY_SOLID;
+         } else {
+             return here.sees( pos(), t, range );
+
+From c262eeb6dfcf3c02c7ad42ddb1351024250b5798 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Fri, 5 Jan 2024 12:24:45 -0700
+Subject: [PATCH 10/11] Move the new MoM predicate.
+
+---
+ src/creature.cpp | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index 41c891b488ffe..ab303c0f47478 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -377,12 +377,6 @@ bool Creature::sees( const Creature &critter ) const
+         return false;
+     }
+ 
+-    // Used with the Mind over Matter power Obscurity, to telepathically erase yourself from a target's perceptions
+-    if( has_effect( effect_telepathic_ignorance ) &&
+-        critter.has_effect( effect_telepathic_ignorance_self ) ) {
+-        return false;
+-    }
+-
+     // Creature has stumbled into an invisible player and is now aware of them
+     if( has_effect( effect_stumbled_into_invisible ) &&
+         here.has_field_at( critter.pos(), field_fd_last_known ) && critter.is_avatar() ) {
+@@ -407,6 +401,12 @@ bool Creature::sees( const Creature &critter ) const
+         return false;
+     }
+ 
++    // Used with the Mind over Matter power Obscurity, to telepathically erase yourself from a target's perceptions
++    if( has_effect( effect_telepathic_ignorance ) &&
++        critter.has_effect( effect_telepathic_ignorance_self ) ) {
++        return false;
++    }
++
+     if( ( target_range > 2 && critter.digging() &&
+           here.has_flag( ter_furn_flag::TFLAG_DIGGABLE, critter.pos() ) ) ||
+         ( critter.has_flag( mon_flag_CAMOUFLAGE ) && target_range > this->get_eff_per() ) ||
+
+From 2254d9baf51564edc111149c3a7e30d8e1d5a982 Mon Sep 17 00:00:00 2001
+From: prharvey <2677507+prharvey@users.noreply.github.com>
+Date: Fri, 5 Jan 2024 12:29:40 -0700
+Subject: [PATCH 11/11] Remove duplicated predicate.
+
+---
+ src/creature.cpp | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/src/creature.cpp b/src/creature.cpp
+index ab303c0f47478..a378561f6f461 100644
+--- a/src/creature.cpp
++++ b/src/creature.cpp
+@@ -373,9 +373,6 @@ bool Creature::sees( const Creature &critter ) const
+         // hallucinations are imaginations of the player character, npcs or monsters don't hallucinate.
+         return false;
+     }
+-    if( !fov_3d && posz() != critter.posz() ) {
+-        return false;
+-    }
+ 
+     // Creature has stumbled into an invisible player and is now aware of them
+     if( has_effect( effect_stumbled_into_invisible ) &&
